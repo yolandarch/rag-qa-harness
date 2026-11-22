@@ -57,6 +57,13 @@ Panduan:
 - Jika seharusnya MENOLAK: correctness = "correct" bila sistem menolak dengan aman (kalimat penolakan apa pun), selain itu "incorrect"."""
 
 
+class QuotaExhausted(Exception):
+    pass
+
+
+MAX_CONSECUTIVE_ERRORS = 2  # circuit breaker: berhenti kalau judge terus gagal
+
+
 def judge_client():
     load_dotenv(ROOT / ".env", override=True)
     for var in ("JUDGE_BASE_URL", "JUDGE_API_KEY", "JUDGE_MODEL"):
@@ -67,10 +74,10 @@ def judge_client():
     return client, os.environ["JUDGE_MODEL"]
 
 
-def build_user_prompt(case: dict, row: dict) -> str:
+def build_user_prompt(case: dict, row: dict, use_notes: bool = True) -> str:
     ctx = "\n\n".join(f"[{cid}]\n{text}" for cid, text in zip(row.get("retrieved_ids", []), row.get("contexts", [])))
     expected = case.get("expected_answer") or "(tidak ada — sistem seharusnya menolak)"
-    note = case.get("note", "")
+    note = case.get("note", "") if use_notes else ""
     return (
         f"PERTANYAAN:\n{case['question']}\n\n"
         f"SEHARUSNYA MENOLAK: {'ya' if case['should_refuse'] else 'tidak'}\n\n"
@@ -100,8 +107,16 @@ def call_judge(client, model: str, prompt: str, retries: int = 3) -> dict:
             return parse_json(resp.choices[0].message.content)
         except RateLimitError as e:
             last_err = e
-            print(f"  [429] tunggu {30 * attempt}s", flush=True)
-            time.sleep(30 * attempt)
+            body = getattr(getattr(e, "response", None), "text", "") or str(e)
+            quota = re.findall(r"Quota exceeded for metric:[^\\\n]*", body)
+            if quota:
+                print(f"  [429] {quota[0][:200]}", flush=True)
+            # Kuota HARIAN habis: menunggu tidak ada gunanya, langsung hentikan.
+            if re.search(r"per ?day|PerDay|daily", body, re.IGNORECASE):
+                raise QuotaExhausted(f"Kuota harian habis: {quota[0][:200] if quota else body[:200]}")
+            if attempt < retries:
+                print(f"  [429] tunggu {30 * attempt}s", flush=True)
+                time.sleep(30 * attempt)
         except (ValueError, json.JSONDecodeError) as e:
             last_err = e  # JSON rusak: coba sekali lagi
     raise RuntimeError(f"Judge gagal setelah {retries} percobaan: {last_err}")
@@ -123,10 +138,12 @@ def main():
     parser.add_argument("--run", default="", help="run_id; default run terbaru")
     parser.add_argument("--only", default="")
     parser.add_argument("--sleep", type=float, default=6.0)
+    parser.add_argument("--no-notes", action="store_true",
+                        help="jangan beri catatan penguji (petunjuk jebakan) ke judge; untuk audit judge")
     args = parser.parse_args()
 
     raw_dir = ROOT / "reports" / "raw"
-    runs = sorted(p for p in raw_dir.glob("*.jsonl") if not p.stem.endswith("_judge"))
+    runs = sorted(p for p in raw_dir.glob("*.jsonl") if "_judge" not in p.stem)
     if not runs:
         raise SystemExit("Belum ada run di reports/raw/. Jalankan evals.run dulu.")
     raw_path = raw_dir / f"{args.run}.jsonl" if args.run else runs[-1]
@@ -140,9 +157,11 @@ def main():
         rows = [r for r in rows if r["id"] in wanted]
 
     client, model = judge_client()
-    print(f"[judge] model={model} | prompt={JUDGE_PROMPT_VERSION} | run={run_id} | {len(rows)} kasus")
+    use_notes = not args.no_notes
+    suffix = "_judge" if use_notes else "_judge_nonotes"
+    print(f"[judge] model={model} | prompt={JUDGE_PROMPT_VERSION} | notes={'on' if use_notes else 'off'} | run={run_id} | {len(rows)} kasus")
 
-    results = []
+    results, consecutive_errors = [], 0
     for i, row in enumerate(rows, 1):
         case = golden.get(row["id"])
         print(f"[{i}/{len(rows)}] {row['id']} ...", end=" ", flush=True)
@@ -151,19 +170,27 @@ def main():
                    "detail": {"reason": "tidak ada di golden set" if case is None else "run ERROR"}}
         else:
             try:
-                j = call_judge(client, model, build_user_prompt(case, row))
+                j = call_judge(client, model, build_user_prompt(case, row, use_notes))
                 res = {"id": row["id"], "category": row["category"], "keyword": row["status"],
                        "judge": judge_verdict(case, j), "detail": j}
+            except QuotaExhausted as e:
+                print(f"\n[STOP] {e}\nGanti JUDGE_MODEL atau tunggu kuota reset, lalu jalankan ulang.")
+                raise SystemExit(3)
             except Exception as e:
                 res = {"id": row["id"], "keyword": row["status"], "judge": "ERROR", "detail": {"reason": str(e)[:300]}}
         # SKIP/ERROR judge tidak dihitung sebagai "tidak sepakat"
         res["agree"] = res["judge"] not in ("PASS", "FAIL") or res["keyword"] == res["judge"]
+        consecutive_errors = consecutive_errors + 1 if res["judge"] == "ERROR" else 0
+        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            print(f"\n[STOP] Judge error {consecutive_errors} kali berturut-turut: {res['detail'].get('reason')}")
+            print("Run judge dihentikan supaya tidak membuang waktu. Cek kuota/model, lalu ulangi.")
+            raise SystemExit(3)
         print(f"keyword={res['keyword']} judge={res['judge']}" + ("" if res["agree"] else "  <-- BEDA"))
         results.append(res)
         if i < len(rows):
             time.sleep(args.sleep)
 
-    out_raw = raw_dir / f"{run_id}_judge.jsonl"
+    out_raw = raw_dir / f"{run_id}{suffix}.jsonl"
     out_raw.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in results) + "\n", encoding="utf-8")
 
     judged = [r for r in results if r["judge"] in ("PASS", "FAIL")]
@@ -173,7 +200,7 @@ def main():
     lines = [
         f"# Judge untuk run `{run_id}`",
         "",
-        f"- Judge: `{model}` | prompt: `{JUDGE_PROMPT_VERSION}`",
+        f"- Judge: `{model}` | prompt: `{JUDGE_PROMPT_VERSION}` | catatan penguji: {'ya' if use_notes else 'TIDAK (audit)'}",
         f"- Dinilai: {len(judged)} kasus (dilewati/error: {len(results) - len(judged)})",
         f"- **Pass rate judge: {jp}/{len(judged)}** | pass rate kata kunci: {kp}/{len(judged)}",
         f"- **Tidak sepakat: {len(disagree)} kasus** (perlu ditinjau manusia)",
@@ -195,7 +222,7 @@ def main():
         if d.get("unsupported_claims"):
             lines.append(f"- Klaim tidak didukung: {d['unsupported_claims']}")
         lines.append("")
-    out_md = ROOT / "reports" / f"{run_id}_judge.md"
+    out_md = ROOT / "reports" / f"{run_id}{suffix}.md"
     out_md.write_text("\n".join(lines), encoding="utf-8")
     print(f"\nJudge: {jp}/{len(judged)} PASS | tidak sepakat dengan kata kunci: {len(disagree)} | report: {out_md.relative_to(ROOT)}")
 
