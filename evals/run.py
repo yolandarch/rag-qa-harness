@@ -1,0 +1,195 @@
+"""
+Jalankan golden set terhadap RAG dan simpan hasilnya sebagai report.
+
+Pemakaian (dari root repo):
+    python -m evals.run --domain banking
+    python -m evals.run --domain banking --top-k 5 --sleep 3 --min-pass 0.7
+
+Output:
+    reports/raw/<run_id>.jsonl  -> detail per test case (tidak di-commit)
+    reports/<run_id>.md         -> ringkasan untuk dibaca manusia (di-commit)
+
+Status per test case:
+    PASS  -> semua pengecekan lolos
+    FAIL  -> sistem menjawab, tapi jawabannya salah menurut pengecekan
+    ERROR -> sistem tidak bisa menjawab (timeout, 503, dll.). Dipisah dari FAIL
+             karena masalah infrastruktur bukan masalah kualitas jawaban.
+
+Versi ini hanya memakai pengecekan deterministik (tanpa LLM judge):
+    - refusal_ok   : menolak jika seharusnya menolak, dan tidak menolak jika seharusnya menjawab
+    - must_include : kata/frasa kunci wajib muncul di jawaban
+    - has_citation : jawaban yang bukan penolakan wajib menyertakan [id_chunk]
+"""
+
+import argparse
+import hashlib
+import json
+import re
+import statistics
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.rag import REFUSAL, answer
+
+ROOT = Path(__file__).resolve().parent.parent
+CITATION_RE = re.compile(r"\[[\w.\-]+-p\d+-c\d+\]")
+
+
+def normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").lower()).strip()
+
+
+def is_refusal(ans: str) -> bool:
+    return normalize(REFUSAL) in normalize(ans)
+
+
+def evaluate(case: dict, out: dict) -> dict:
+    ans = out["answer"]
+    refused = is_refusal(ans)
+    checks = {"refusal_ok": refused == bool(case["should_refuse"])}
+
+    if not case["should_refuse"]:
+        terms = case.get("must_include", [])
+        missing = [t for t in terms if normalize(t) not in normalize(ans)]
+        checks["must_include"] = not missing
+        checks["has_citation"] = bool(CITATION_RE.search(ans))
+    else:
+        missing = []
+
+    return {"status": "PASS" if all(checks.values()) else "FAIL", "checks": checks, "missing_terms": missing}
+
+
+def load_golden(path: Path) -> list[dict]:
+    with path.open(encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def error_detail(exc: Exception) -> str:
+    """Simpan isi respons error, bukan hanya kode status. Pelajaran dari debugging 503/404."""
+    msg = f"{type(exc).__name__}: {exc}"
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            msg += f" | body: {resp.text[:300]}"
+        except Exception:
+            pass
+    return msg
+
+
+def pct(n: int, d: int) -> str:
+    return f"{n}/{d} ({n / d:.0%})" if d else "0/0"
+
+
+def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
+    total = len(rows)
+    passed = sum(r["status"] == "PASS" for r in rows)
+    failed = sum(r["status"] == "FAIL" for r in rows)
+    errors = sum(r["status"] == "ERROR" for r in rows)
+    answered = total - errors
+    pass_rate = passed / answered if answered else 0.0
+
+    by_cat = defaultdict(lambda: {"PASS": 0, "FAIL": 0, "ERROR": 0})
+    for r in rows:
+        by_cat[r["category"]][r["status"]] += 1
+
+    gen_lat = [r["latency_generate_s"] for r in rows if r.get("latency_generate_s") is not None]
+
+    lines = [
+        f"# Eval run `{meta['run_id']}`",
+        "",
+        "## Konfigurasi",
+        f"- Model: `{meta['model']}`",
+        f"- Koleksi: `{meta['collection']}` | top_k: {meta['top_k']}",
+        f"- Golden set: `{meta['golden_file']}` (sha256 {meta['golden_sha']}, {total} kasus, "
+        f"{meta['unverified']} belum diverifikasi manual)",
+        "",
+        "## Ringkasan",
+        f"- **Pass rate (dari yang terjawab): {pass_rate:.0%}**",
+        f"- PASS {passed} | FAIL {failed} | ERROR {errors} (dari {total})",
+    ]
+    if gen_lat:
+        lines.append(
+            f"- Latency generate: median {statistics.median(gen_lat):.1f}s, maks {max(gen_lat):.1f}s"
+        )
+    lines += ["", "## Per kategori", "", "| Kategori | PASS | FAIL | ERROR |", "|---|---|---|---|"]
+    for cat, c in sorted(by_cat.items()):
+        lines.append(f"| {cat} | {c['PASS']} | {c['FAIL']} | {c['ERROR']} |")
+
+    lines += ["", "## Detail yang tidak lolos", ""]
+    bad = [r for r in rows if r["status"] != "PASS"]
+    if not bad:
+        lines.append("_Semua lolos._")
+    for r in bad:
+        lines.append(f"### {r['id']} ({r['category']}) — {r['status']}")
+        lines.append(f"- Pertanyaan: {r['question']}")
+        if r["status"] == "ERROR":
+            lines.append(f"- Error: `{r['error']}`")
+        else:
+            failed_checks = [k for k, v in r["checks"].items() if not v]
+            lines.append(f"- Cek gagal: {', '.join(failed_checks)}")
+            if r["missing_terms"]:
+                lines.append(f"- Kata kunci hilang: {r['missing_terms']}")
+            lines.append(f"- Jawaban: {r['answer'][:400]}")
+            lines.append(f"- Chunk terambil: {', '.join(r['retrieved_ids'])}")
+        lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return pass_rate
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Jalankan golden set dan buat report")
+    parser.add_argument("--domain", default="banking")
+    parser.add_argument("--collection", default="banking_cs800_ov150")
+    parser.add_argument("--top-k", type=int, default=4)
+    parser.add_argument("--sleep", type=float, default=2.0, help="jeda antar pertanyaan (hindari rate limit)")
+    parser.add_argument("--min-pass", type=float, default=0.0, help="exit code 1 jika pass rate di bawah ini (untuk CI)")
+    args = parser.parse_args()
+
+    golden_path = ROOT / "data" / args.domain / "golden.jsonl"
+    cases = load_golden(golden_path)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    (ROOT / "reports" / "raw").mkdir(parents=True, exist_ok=True)
+    raw_path = ROOT / "reports" / "raw" / f"{run_id}.jsonl"
+
+    rows, model = [], None
+    with raw_path.open("w", encoding="utf-8") as raw:
+        for i, case in enumerate(cases, 1):
+            print(f"[{i}/{len(cases)}] {case['id']} ...", end=" ", flush=True)
+            row = {"id": case["id"], "category": case["category"], "question": case["question"]}
+            try:
+                out = answer(case["question"], args.collection, args.top_k)
+                model = out["model"]
+                row.update(out)
+                row.update(evaluate(case, out))
+            except Exception as exc:  # satu kasus gagal tidak boleh menghentikan seluruh run
+                row.update({"status": "ERROR", "error": error_detail(exc), "checks": {}, "missing_terms": []})
+            print(row["status"])
+            rows.append(row)
+            raw.write(json.dumps(row, ensure_ascii=False) + "\n")
+            if i < len(cases):
+                time.sleep(args.sleep)
+
+    meta = {
+        "run_id": run_id,
+        "model": model or "(semua kasus error)",
+        "collection": args.collection,
+        "top_k": args.top_k,
+        "golden_file": str(golden_path.relative_to(ROOT)).replace("\\", "/"),
+        "golden_sha": hashlib.sha256(golden_path.read_bytes()).hexdigest()[:12],
+        "unverified": sum(not c.get("verified", False) for c in cases),
+    }
+    report_path = ROOT / "reports" / f"{run_id}.md"
+    pass_rate = write_report(report_path, meta, rows)
+    print(f"\nPass rate: {pass_rate:.0%} | report: {report_path.relative_to(ROOT)}")
+
+    if pass_rate < args.min_pass:
+        print(f"GAGAL quality gate: pass rate {pass_rate:.0%} < {args.min_pass:.0%}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
