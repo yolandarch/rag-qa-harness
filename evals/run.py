@@ -35,11 +35,21 @@ from pathlib import Path
 from app.rag import REFUSAL, answer
 
 ROOT = Path(__file__).resolve().parent.parent
-CITATION_RE = re.compile(r"\[[\w.\-]+-p\d+-c\d+\]")
-
+MAX_ERROR_RATE = 0.2  # run dengan error di atas ini dianggap tidak valid
+CITATION_RE = re.compile(r"[\[【]\s*(?:sumber:\s*)?[\w.\-]+-p\d+-c\d+\s*[\]】]", re.IGNORECASE)
 
 def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").lower()).strip()
+    text = (text or "").lower()
+    # "10 (sepuluh) hari kerja" -> "10 hari kerja": gaya penulisan angka di regulasi Indonesia
+    text = re.sub(r"(\d)\s*\([a-z\s]+\)", r"\1", text)
+    text = text.replace("**", "")  # buang penanda tebal markdown
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def term_found(term, ans_norm: str) -> bool:
+    """term bisa string, atau list alternatif (lolos jika salah satu muncul)."""
+    alternatives = term if isinstance(term, list) else [term]
+    return any(normalize(t) in ans_norm for t in alternatives)
 
 
 def is_refusal(ans: str) -> bool:
@@ -53,7 +63,8 @@ def evaluate(case: dict, out: dict) -> dict:
 
     if not case["should_refuse"]:
         terms = case.get("must_include", [])
-        missing = [t for t in terms if normalize(t) not in normalize(ans)]
+        ans_norm = normalize(ans)
+        missing = [t for t in terms if not term_found(t, ans_norm)]
         checks["must_include"] = not missing
         checks["has_citation"] = bool(CITATION_RE.search(ans))
     else:
@@ -73,7 +84,10 @@ def error_detail(exc: Exception) -> str:
     resp = getattr(exc, "response", None)
     if resp is not None:
         try:
-            msg += f" | body: {resp.text[:300]}"
+            body = resp.text
+            # ambil baris penjelas kuota kalau ada, karena itu info yang paling berguna
+            quota = re.findall(r"Quota exceeded for metric:[^\\\n]*", body)
+            msg += f" | quota: {quota[0][:250]}" if quota else f" | body: {body[:600]}"
         except Exception:
             pass
     return msg
@@ -90,6 +104,8 @@ def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
     errors = sum(r["status"] == "ERROR" for r in rows)
     answered = total - errors
     pass_rate = passed / answered if answered else 0.0
+    error_rate = errors / total if total else 1.0
+    valid = error_rate <= MAX_ERROR_RATE
 
     by_cat = defaultdict(lambda: {"PASS": 0, "FAIL": 0, "ERROR": 0})
     for r in rows:
@@ -101,12 +117,19 @@ def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
         f"# Eval run `{meta['run_id']}`",
         "",
         "## Konfigurasi",
-        f"- Model: `{meta['model']}`",
+        f"- Model: `{meta['model']}` | Embedding: `{meta['embedding']}`",
         f"- Koleksi: `{meta['collection']}` | top_k: {meta['top_k']}",
         f"- Golden set: `{meta['golden_file']}` (sha256 {meta['golden_sha']}, {total} kasus, "
         f"{meta['unverified']} belum diverifikasi manual)",
         "",
         "## Ringkasan",
+    ]
+    if not valid:
+        lines.append(
+            f"> **RUN TIDAK VALID:** {errors}/{total} kasus ERROR ({error_rate:.0%}, batas {MAX_ERROR_RATE:.0%}). "
+            "Pass rate di bawah tidak boleh dipakai untuk membandingkan konfigurasi."
+        )
+    lines += [
         f"- **Pass rate (dari yang terjawab): {pass_rate:.0%}**",
         f"- PASS {passed} | FAIL {failed} | ERROR {errors} (dari {total})",
     ]
@@ -132,12 +155,12 @@ def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
             lines.append(f"- Cek gagal: {', '.join(failed_checks)}")
             if r["missing_terms"]:
                 lines.append(f"- Kata kunci hilang: {r['missing_terms']}")
-            lines.append(f"- Jawaban: {r['answer'][:400]}")
+            lines.append(f"- Jawaban: {r['answer'][:1500]}")
             lines.append(f"- Chunk terambil: {', '.join(r['retrieved_ids'])}")
         lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
-    return pass_rate
+    return pass_rate, valid
 
 
 def main():
@@ -146,16 +169,22 @@ def main():
     parser.add_argument("--collection", default="banking_cs800_ov150")
     parser.add_argument("--top-k", type=int, default=4)
     parser.add_argument("--sleep", type=float, default=2.0, help="jeda antar pertanyaan (hindari rate limit)")
+    parser.add_argument("--only", default="", help="jalankan ID tertentu saja, pisahkan dengan koma")
     parser.add_argument("--min-pass", type=float, default=0.0, help="exit code 1 jika pass rate di bawah ini (untuk CI)")
     args = parser.parse_args()
 
     golden_path = ROOT / "data" / args.domain / "golden.jsonl"
     cases = load_golden(golden_path)
+    if args.only:
+        wanted = {x.strip() for x in args.only.split(",") if x.strip()}
+        cases = [c for c in cases if c["id"] in wanted]
+        if not cases:
+            raise SystemExit(f"Tidak ada test case dengan ID: {sorted(wanted)}")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     (ROOT / "reports" / "raw").mkdir(parents=True, exist_ok=True)
     raw_path = ROOT / "reports" / "raw" / f"{run_id}.jsonl"
 
-    rows, model = [], None
+    rows, model, emb_model = [], None, None
     with raw_path.open("w", encoding="utf-8") as raw:
         for i, case in enumerate(cases, 1):
             print(f"[{i}/{len(cases)}] {case['id']} ...", end=" ", flush=True)
@@ -163,6 +192,7 @@ def main():
             try:
                 out = answer(case["question"], args.collection, args.top_k)
                 model = out["model"]
+                emb_model = out.get("embedding_model")
                 row.update(out)
                 row.update(evaluate(case, out))
             except Exception as exc:  # satu kasus gagal tidak boleh menghentikan seluruh run
@@ -176,6 +206,7 @@ def main():
     meta = {
         "run_id": run_id,
         "model": model or "(semua kasus error)",
+        "embedding": emb_model or "(tidak diketahui)",
         "collection": args.collection,
         "top_k": args.top_k,
         "golden_file": str(golden_path.relative_to(ROOT)).replace("\\", "/"),
@@ -183,9 +214,12 @@ def main():
         "unverified": sum(not c.get("verified", False) for c in cases),
     }
     report_path = ROOT / "reports" / f"{run_id}.md"
-    pass_rate = write_report(report_path, meta, rows)
+    pass_rate, valid = write_report(report_path, meta, rows)
     print(f"\nPass rate: {pass_rate:.0%} | report: {report_path.relative_to(ROOT)}")
 
+    if not valid:
+        print(f"RUN TIDAK VALID: terlalu banyak ERROR (batas {MAX_ERROR_RATE:.0%}). Cek kuota/koneksi lalu ulangi.")
+        sys.exit(2)
     if pass_rate < args.min_pass:
         print(f"GAGAL quality gate: pass rate {pass_rate:.0%} < {args.min_pass:.0%}")
         sys.exit(1)

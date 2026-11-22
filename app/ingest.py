@@ -2,11 +2,14 @@
 Ingest PDF dokumen ke ChromaDB.
 
 Pemakaian (dari root repo):
-    python -m app.ingest --domain banking
-    python -m app.ingest --domain banking --chunk-size 800 --overlap 150 --reset
+    python -m app.ingest --domain banking                                   # baseline (embedding bawaan Chroma)
+    python -m app.ingest --domain banking --embedding gemini-embedding-001  # embedding lewat API
+    python -m app.ingest --domain banking --chunk-size 1200 --overlap 200 --reset
 
-Alur: PDF -> teks per halaman -> chunk (dengan overlap) -> simpan ke Chroma
+Alur: PDF -> teks per halaman -> chunk (dengan overlap) -> embedding -> simpan ke Chroma
 beserta metadata (nama file, nomor halaman), supaya jawaban bisa dilacak sumbernya.
+Nama model embedding disimpan di metadata koleksi, sehingga rag.py otomatis memakai
+model yang sama untuk meng-embed pertanyaan.
 """
 
 import argparse
@@ -15,6 +18,8 @@ from pathlib import Path
 
 import chromadb
 from pypdf import PdfReader
+
+from app.embeddings import DEFAULT_EMBEDDING, collection_name, embed
 
 ROOT = Path(__file__).resolve().parent.parent
 CHROMA_DIR = ROOT / ".chroma"
@@ -70,6 +75,8 @@ def main():
     parser.add_argument("--domain", default="banking", help="nama folder di data/, mis. banking")
     parser.add_argument("--chunk-size", type=int, default=800)
     parser.add_argument("--overlap", type=int, default=150)
+    parser.add_argument("--embedding", default=DEFAULT_EMBEDDING,
+                        help='nama model embedding di API, atau "chroma-default" untuk baseline')
     parser.add_argument("--reset", action="store_true", help="hapus koleksi lama sebelum ingest")
     args = parser.parse_args()
 
@@ -79,15 +86,16 @@ def main():
         raise SystemExit(f"Tidak ada PDF di {docs_dir}. Download dokumennya dulu (lihat data/{args.domain}/SOURCES.md).")
 
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    collection_name = f"{args.domain}_cs{args.chunk_size}_ov{args.overlap}"
+    name = collection_name(args.domain, args.embedding, args.chunk_size, args.overlap)
     if args.reset:
         try:
-            client.delete_collection(collection_name)
+            client.delete_collection(name)
         except Exception:
             pass  # koleksi belum ada
-    # Catatan: embedding default Chroma adalah model kecil berbahasa Inggris.
-    # Sengaja dipakai sebagai baseline; nanti dibandingkan dengan model multilingual.
-    collection = client.get_or_create_collection(collection_name)
+    collection = client.get_or_create_collection(
+        name,
+        metadata={"embedding_model": args.embedding, "chunk_size": args.chunk_size, "overlap": args.overlap},
+    )
 
     total = 0
     for pdf in pdfs:
@@ -99,13 +107,19 @@ def main():
         if not ids:
             print(f"[WARN] {pdf.name}: tidak ada teks yang bisa diekstrak (PDF hasil scan?)")
             continue
+
+        vectors = None if args.embedding == DEFAULT_EMBEDDING else embed(texts, args.embedding)
+
         # upsert per batch agar aman untuk dokumen besar
         for b in range(0, len(ids), 100):
-            collection.upsert(ids=ids[b:b + 100], documents=texts[b:b + 100], metadatas=metas[b:b + 100])
+            kwargs = {"ids": ids[b:b + 100], "documents": texts[b:b + 100], "metadatas": metas[b:b + 100]}
+            if vectors is not None:
+                kwargs["embeddings"] = vectors[b:b + 100]
+            collection.upsert(**kwargs)
         print(f"[OK] {pdf.name}: {len(ids)} chunk")
         total += len(ids)
 
-    print(f"\nSelesai. {total} chunk di koleksi '{collection_name}' ({CHROMA_DIR})")
+    print(f"\nSelesai. {total} chunk di koleksi '{name}' (embedding: {args.embedding})")
 
 
 if __name__ == "__main__":
