@@ -4,3 +4,4 @@ __pycache__/
 data/*/docs/*.pdf
 reports/raw/
 .chroma/
+scratch*.py
