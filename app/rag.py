@@ -11,6 +11,7 @@ Model embedding untuk pertanyaan dibaca otomatis dari metadata koleksi Chroma.
 """
 
 import argparse
+import json
 import os
 import time
 from pathlib import Path
@@ -23,6 +24,9 @@ from app.embeddings import DEFAULT_EMBEDDING, embed
 
 ROOT = Path(__file__).resolve().parent.parent
 CHROMA_DIR = ROOT / ".chroma"
+
+# Naikkan setiap kali prompt atau format konteks berubah, supaya report bisa dilacak.
+PROMPT_VERSION = "v2-doc-titles"
 
 # Kalimat penolakan dibuat baku supaya evaluasi kategori "unanswerable" bisa dicek secara pasti.
 REFUSAL = "Informasi tersebut tidak tersedia dalam dokumen yang saya miliki."
@@ -58,9 +62,22 @@ def retrieve(question: str, collection_name: str, top_k: int) -> tuple[list[dict
     return chunks, emb_model
 
 
-def build_context(chunks: list[dict]) -> str:
+def load_doc_titles(collection_name: str) -> dict:
+    """Judul dokumen yang mudah dibaca, dari data/<domain>/doc_titles.json.
+    Domain diambil dari awal nama koleksi (mis. 'banking_...')."""
+    domain = collection_name.split("_")[0]
+    path = ROOT / "data" / domain / "doc_titles.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def build_context(chunks: list[dict], titles: dict) -> str:
+    # Header berisi judul dokumen lengkap, bukan hanya nama file, supaya model tahu
+    # potongan teks itu berasal dari peraturan apa (contextual chunk header).
     return "\n\n".join(
-        f"[{c['id']}] (sumber: {c['metadata']['source']}, hal. {c['metadata']['page']})\n{c['text']}"
+        f"[{c['id']}] (dokumen: {titles.get(c['metadata']['source'], c['metadata']['source'])}, "
+        f"hal. {c['metadata']['page']})\n{c['text']}"
         for c in chunks
     )
 
@@ -84,7 +101,8 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
     t0 = time.perf_counter()
     chunks, emb_model = retrieve(question, collection_name, top_k)
     t_retrieve = time.perf_counter() - t0
-    print(f"[config] model={model} | embedding={emb_model} | collection={collection_name} | top_k={top_k}")
+    titles = load_doc_titles(collection_name)
+    print(f"[config] model={model} | embedding={emb_model} | collection={collection_name} | top_k={top_k} | prompt={PROMPT_VERSION}")
 
     t1 = time.perf_counter()
     resp = llm.chat.completions.create(
@@ -92,7 +110,7 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
         temperature=0,  # sekecil mungkin variasi antar-run, penting untuk regression test
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"KONTEKS:\n{build_context(chunks)}\n\nPERTANYAAN:\n{question}"},
+            {"role": "user", "content": f"KONTEKS:\n{build_context(chunks, titles)}\n\nPERTANYAAN:\n{question}"},
         ],
     )
     t_generate = time.perf_counter() - t1
@@ -105,6 +123,7 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
         "contexts": [c["text"] for c in chunks],
         "model": model,
         "embedding_model": emb_model,
+        "prompt_version": PROMPT_VERSION,
         "collection": collection_name,
         "top_k": top_k,
         "latency_retrieve_s": round(t_retrieve, 3),

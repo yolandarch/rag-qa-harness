@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_ERROR_RATE = 0.2  # run dengan error di atas ini dianggap tidak valid
 CITATION_RE = re.compile(r"[\[【]\s*(?:sumber:\s*)?[\w.\-]+-p\d+-c\d+\s*[\]】]", re.IGNORECASE)
 
+
 def normalize(text: str) -> str:
     text = (text or "").lower()
     # "10 (sepuluh) hari kerja" -> "10 hari kerja": gaya penulisan angka di regulasi Indonesia
@@ -118,7 +119,7 @@ def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
         "",
         "## Konfigurasi",
         f"- Model: `{meta['model']}` | Embedding: `{meta['embedding']}`",
-        f"- Koleksi: `{meta['collection']}` | top_k: {meta['top_k']}",
+        f"- Koleksi: `{meta['collection']}` | top_k: {meta['top_k']} | prompt: `{meta['prompt_version']}`",
         f"- Golden set: `{meta['golden_file']}` (sha256 {meta['golden_sha']}, {total} kasus, "
         f"{meta['unverified']} belum diverifikasi manual)",
         "",
@@ -184,7 +185,7 @@ def main():
     (ROOT / "reports" / "raw").mkdir(parents=True, exist_ok=True)
     raw_path = ROOT / "reports" / "raw" / f"{run_id}.jsonl"
 
-    rows, model, emb_model = [], None, None
+    rows, model, emb_model, prompt_v = [], None, None, None
     with raw_path.open("w", encoding="utf-8") as raw:
         for i, case in enumerate(cases, 1):
             print(f"[{i}/{len(cases)}] {case['id']} ...", end=" ", flush=True)
@@ -193,6 +194,7 @@ def main():
                 out = answer(case["question"], args.collection, args.top_k)
                 model = out["model"]
                 emb_model = out.get("embedding_model")
+                prompt_v = out.get("prompt_version")
                 row.update(out)
                 row.update(evaluate(case, out))
             except Exception as exc:  # satu kasus gagal tidak boleh menghentikan seluruh run
@@ -207,6 +209,7 @@ def main():
         "run_id": run_id,
         "model": model or "(semua kasus error)",
         "embedding": emb_model or "(tidak diketahui)",
+        "prompt_version": prompt_v or "(tidak diketahui)",
         "collection": args.collection,
         "top_k": args.top_k,
         "golden_file": str(golden_path.relative_to(ROOT)).replace("\\", "/"),
