@@ -68,10 +68,15 @@ def evaluate(case: dict, out: dict) -> dict:
         missing = [t for t in terms if not term_found(t, ans_norm)]
         checks["must_include"] = not missing
         checks["has_citation"] = bool(CITATION_RE.search(ans))
+        # Asersi negatif: frasa yang TIDAK boleh muncul (mis. aturan lain yang sering tercampur)
+        forbidden = [t for t in case.get("must_not_include", []) if term_found(t, ans_norm)]
+        if case.get("must_not_include"):
+            checks["no_forbidden"] = not forbidden
     else:
-        missing = []
+        missing, forbidden = [], []
 
-    return {"status": "PASS" if all(checks.values()) else "FAIL", "checks": checks, "missing_terms": missing}
+    return {"status": "PASS" if all(checks.values()) else "FAIL", "checks": checks,
+            "missing_terms": missing, "forbidden_terms": forbidden}
 
 
 def load_golden(path: Path) -> list[dict]:
@@ -156,6 +161,8 @@ def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
             lines.append(f"- Cek gagal: {', '.join(failed_checks)}")
             if r["missing_terms"]:
                 lines.append(f"- Kata kunci hilang: {r['missing_terms']}")
+            if r.get("forbidden_terms"):
+                lines.append(f"- Frasa terlarang muncul: {r['forbidden_terms']}")
             lines.append(f"- Jawaban: {r['answer'][:1500]}")
             lines.append(f"- Chunk terambil: {', '.join(r['retrieved_ids'])}")
         lines.append("")
@@ -198,7 +205,7 @@ def main():
                 row.update(out)
                 row.update(evaluate(case, out))
             except Exception as exc:  # satu kasus gagal tidak boleh menghentikan seluruh run
-                row.update({"status": "ERROR", "error": error_detail(exc), "checks": {}, "missing_terms": []})
+                row.update({"status": "ERROR", "error": error_detail(exc), "checks": {}, "missing_terms": [], "forbidden_terms": []})
             print(row["status"])
             rows.append(row)
             raw.write(json.dumps(row, ensure_ascii=False) + "\n")
