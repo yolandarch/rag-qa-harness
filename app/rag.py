@@ -26,7 +26,10 @@ ROOT = Path(__file__).resolve().parent.parent
 CHROMA_DIR = ROOT / ".chroma"
 
 # Naikkan setiap kali prompt atau format konteks berubah, supaya report bisa dilacak.
-PROMPT_VERSION = "v4-pasal-headers"  # aturan no-merge (v3) dihapus; lihat riwayat git
+# Eksperimen 5 (nomor pasal di header) TIDAK diadopsi: F002 tetap tercampur dan F005 jadi false refusal 2/2.
+# Metadata pasal tetap disimpan di koleksi, tapi tidak ditampilkan ke model kecuali SHOW_PASAL=True.
+SHOW_PASAL = False
+PROMPT_VERSION = "v4-pasal-headers" if SHOW_PASAL else "v2-doc-titles"
 
 # Kalimat penolakan dibuat baku supaya evaluasi kategori "unanswerable" bisa dicek secara pasti.
 REFUSAL = "Informasi tersebut tidak tersedia dalam dokumen yang saya miliki."
@@ -75,7 +78,7 @@ def load_doc_titles(collection_name: str) -> dict:
 def chunk_location(meta: dict, titles: dict) -> str:
     """Lokasi chunk yang mudah dibaca: dokumen, pasal (jika ada), bagian penjelasan, halaman."""
     parts = [f"dokumen: {titles.get(meta['source'], meta['source'])}"]
-    if meta.get("pasal"):
+    if SHOW_PASAL and meta.get("pasal"):
         parts.append(meta["pasal"] + (" (bagian Penjelasan)" if meta.get("bagian") == "Penjelasan" else ""))
     parts.append(f"hal. {meta['page']}")
     return ", ".join(parts)
