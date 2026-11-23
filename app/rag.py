@@ -129,7 +129,8 @@ def chunk_location(meta: dict, titles: dict) -> str:
     parts = [f"dokumen: {titles.get(meta['source'], meta['source'])}"]
     if SHOW_PASAL and meta.get("pasal"):
         parts.append(meta["pasal"] + (" (bagian Penjelasan)" if meta.get("bagian") == "Penjelasan" else ""))
-    parts.append(f"hal. {meta['page']}")
+    end = meta.get("page_end")
+    parts.append(f"hal. {meta['page']}-{end}" if end and end != meta["page"] else f"hal. {meta['page']}")
     return ", ".join(parts)
 
 
