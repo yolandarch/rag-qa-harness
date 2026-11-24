@@ -37,4 +37,5 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install chromadb pypdf python-dotenv openai rank_bm25
-      - run: echo "TODO: unduh PDF (lihat data/banking/SOURCES.md), ingest, lalu evals.run --min-pass 0.8"
+      - run: |
+          echo "TODO - unduh PDF (lihat data/banking/SOURCES.md), ingest, lalu evals.run --min-pass 0.8"
