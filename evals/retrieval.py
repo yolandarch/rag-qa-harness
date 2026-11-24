@@ -66,6 +66,8 @@ def main():
     parser.add_argument("--mode", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--k", type=int, default=10, help="kedalaman pencarian untuk menghitung peringkat")
     parser.add_argument("--sleep", type=float, default=0.7, help="jeda antar request embedding")
+    parser.add_argument("--max-faq", type=int, default=None, help="batas chunk FAQ di hasil (seperti di RAG)")
+    parser.add_argument("--show", default="", help="ID kasus (pisah koma) yang daftar top-k-nya dicetak")
     args = parser.parse_args()
 
     golden_path = ROOT / "data" / args.domain / "golden.jsonl"
@@ -86,7 +88,13 @@ def main():
         qvec = embed([case["question"]], emb_model)[0]  # sekali, dipakai untuk semua koleksi
         line = []
         for name in args.collection:
-            chunks, _ = retrieve(case["question"], name, args.k, args.mode, query_vec=qvec)
+            chunks, _ = retrieve(case["question"], name, args.k, args.mode, query_vec=qvec, max_faq=args.max_faq)
+            if case["id"] in {x.strip() for x in args.show.split(",")}:
+                print(f"    -- {case['id']} @ {name}")
+                for j, c in enumerate(chunks, 1):
+                    m = c["metadata"]
+                    mark = " <== benar" if is_relevant(m, case["relevant_pasal"]) else ""
+                    print(f"      {j:>2}. {c['id']:<28} {m.get('pasal', '-'):<14} {m.get('bagian', '-')}{mark}")
             r = first_rank(chunks, case["relevant_pasal"])
             ranks[name][case["id"]] = r
             line.append(str(r) if r else "-")
@@ -103,7 +111,7 @@ def main():
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     short = {n: n.replace("banking_gemini-embedding-001_", "") for n in args.collection}
     lines = [f"# Retrieval eval `{run_id}`", "",
-             f"- Mode: `{args.mode}` | k: {args.k} | embedding: `{emb_model}` | {len(cases)} kasus "
+             f"- Mode: `{args.mode}` | k: {args.k} | max_faq: {args.max_faq} | embedding: `{emb_model}` | {len(cases)} kasus "
              "(kasus tanpa `relevant_pasal` dilewati)",
              f"- Golden set: `{golden_path.relative_to(ROOT).as_posix()}`", "",
              "## Ringkasan", "",

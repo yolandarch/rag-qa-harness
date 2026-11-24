@@ -23,7 +23,7 @@ from pathlib import Path
 import chromadb
 from pypdf import PdfReader
 
-from app.ingest import CHROMA_DIR, ROOT, chunk_text, clean_text
+from app.ingest_pasal import CHROMA_DIR, ROOT, chunk_text, clean_text
 
 PASAL_HEADING = re.compile(r"^\s*Pasal\s+(\d+[A-Z]?)\s*$", re.MULTILINE)
 PENJELASAN_HEADING = re.compile(r"^\s*PENJELASAN\s*$", re.MULTILINE)

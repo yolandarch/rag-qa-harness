@@ -135,7 +135,7 @@ def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
         "",
         "## Konfigurasi",
         f"- Model: `{meta['model']}` | Embedding: `{meta['embedding']}`",
-        f"- Koleksi: `{meta['collection']}` | top_k: {meta['top_k']} | retrieval: `{meta['retrieval']}` | prompt: `{meta['prompt_version']}`",
+        f"- Koleksi: `{meta['collection']}` | top_k: {meta['top_k']} | retrieval: `{meta['retrieval']}` | max_faq: {meta['max_faq']} | prompt: `{meta['prompt_version']}`",
         f"- Golden set: `{meta['golden_file']}` (sha256 {meta['golden_sha']}, {total} kasus, "
         f"{meta['unverified']} belum diverifikasi manual)",
         "",
@@ -188,6 +188,7 @@ def main():
     parser.add_argument("--collection", default="banking_gemini-embedding-001_cs800_ov150")
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
+    parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
     parser.add_argument("--sleep", type=float, default=2.0, help="jeda antar pertanyaan (hindari rate limit)")
     parser.add_argument("--only", default="", help="jalankan ID tertentu saja, pisahkan dengan koma")
     parser.add_argument("--min-pass", type=float, default=0.0, help="exit code 1 jika pass rate di bawah ini (untuk CI)")
@@ -210,7 +211,7 @@ def main():
             print(f"[{i}/{len(cases)}] {case['id']} ...", end=" ", flush=True)
             row = {"id": case["id"], "category": case["category"], "question": case["question"]}
             try:
-                out = answer(case["question"], args.collection, args.top_k, args.retrieval)
+                out = answer(case["question"], args.collection, args.top_k, args.retrieval, args.max_faq)
                 model = out["model"]
                 emb_model = out.get("embedding_model")
                 prompt_v = out.get("prompt_version")
@@ -232,6 +233,7 @@ def main():
         "collection": args.collection,
         "top_k": args.top_k,
         "retrieval": args.retrieval,
+        "max_faq": args.max_faq,
         "golden_file": str(golden_path.relative_to(ROOT)).replace("\\", "/"),
         "golden_sha": hashlib.sha256(golden_path.read_bytes()).hexdigest()[:12],
         "unverified": sum(not c.get("verified", False) for c in cases),

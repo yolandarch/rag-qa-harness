@@ -84,8 +84,24 @@ def _dense(question: str, collection, emb_model: str, n: int, query_vec=None) ->
     ]
 
 
+def _cap_faq(ranked: list[dict], top_k: int, max_faq: int | None) -> list[dict]:
+    """Ambil top_k dari daftar terurut, dengan paling banyak max_faq chunk dari FAQ."""
+    if max_faq is None:
+        return ranked[:top_k]
+    out, n_faq = [], 0
+    for c in ranked:
+        is_faq = c["metadata"].get("source", "").lower().startswith("faq")
+        if is_faq and n_faq >= max_faq:
+            continue
+        n_faq += is_faq
+        out.append(c)
+        if len(out) == top_k:
+            break
+    return out
+
+
 def retrieve(question: str, collection_name: str, top_k: int, mode: str = "dense",
-             query_vec=None) -> tuple[list[dict], str]:
+             query_vec=None, max_faq: int | None = None) -> tuple[list[dict], str]:
     """mode="dense": embedding saja. mode="hybrid": embedding + BM25, digabung dengan
     Reciprocal Rank Fusion (RRF), supaya chunk yang cocok kata-per-kata (mis. "lisan") ikut naik."""
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
@@ -93,7 +109,8 @@ def retrieve(question: str, collection_name: str, top_k: int, mode: str = "dense
     emb_model = (collection.metadata or {}).get("embedding_model", DEFAULT_EMBEDDING)
 
     if mode == "dense":
-        return _dense(question, collection, emb_model, top_k, query_vec), emb_model
+        pool = top_k if max_faq is None else max(20, top_k * 5)
+        return _cap_faq(_dense(question, collection, emb_model, pool, query_vec), top_k, max_faq), emb_model
     if mode != "hybrid":
         raise ValueError(f"mode retrieval tidak dikenal: {mode}")
 
@@ -113,8 +130,8 @@ def retrieve(question: str, collection_name: str, top_k: int, mode: str = "dense
         fused[ids[i]] = fused.get(ids[i], 0) + 1 / (k_rrf + rank)
         info.setdefault(ids[i], {"id": ids[i], "text": docs[i], "metadata": metas[i], "distance": None})
 
-    best = sorted(fused, key=fused.get, reverse=True)[:top_k]
-    return [info[cid] for cid in best], emb_model
+    ranked = [info[cid] for cid in sorted(fused, key=fused.get, reverse=True)]
+    return _cap_faq(ranked, top_k, max_faq), emb_model
 
 
 def load_doc_titles(collection_name: str) -> dict:
@@ -147,7 +164,7 @@ def build_context(chunks: list[dict], titles: dict) -> str:
 
 
 def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: int = 4,
-           retrieval: str = "dense") -> dict:
+           retrieval: str = "dense", max_faq: int | None = None) -> dict:
     """Jalankan satu pertanyaan end-to-end. Mengembalikan dict yang nanti dipakai oleh evaluator."""
     # override=True: isi .env selalu menang atas variabel lama yang tertinggal di terminal
     load_dotenv(ROOT / ".env", override=True)
@@ -164,10 +181,10 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
     model = os.environ["LLM_MODEL"]
 
     t0 = time.perf_counter()
-    chunks, emb_model = retrieve(question, collection_name, top_k, retrieval)
+    chunks, emb_model = retrieve(question, collection_name, top_k, retrieval, max_faq=max_faq)
     t_retrieve = time.perf_counter() - t0
     titles = load_doc_titles(collection_name)
-    print(f"[config] model={model} | embedding={emb_model} | collection={collection_name} | top_k={top_k} | retrieval={retrieval} | prompt={PROMPT_VERSION}")
+    print(f"[config] model={model} | embedding={emb_model} | collection={collection_name} | top_k={top_k} | retrieval={retrieval} | max_faq={max_faq} | prompt={PROMPT_VERSION}")
 
     t1 = time.perf_counter()
     resp = llm.chat.completions.create(
@@ -192,6 +209,7 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
         "collection": collection_name,
         "top_k": top_k,
         "retrieval": retrieval,
+        "max_faq": max_faq,
         "latency_retrieve_s": round(t_retrieve, 3),
         "latency_generate_s": round(t_generate, 3),
         "prompt_tokens": getattr(usage, "prompt_tokens", None),
@@ -205,9 +223,10 @@ def main():
     parser.add_argument("--collection", default="banking_gemini-embedding-001_cs800_ov150")
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
+    parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
     args = parser.parse_args()
 
-    out = answer(args.question, args.collection, args.top_k, args.retrieval)
+    out = answer(args.question, args.collection, args.top_k, args.retrieval, args.max_faq)
     print("\n=== JAWABAN ===\n" + out["answer"])
     print("\n=== CHUNK TERAMBIL ===")
     for cid in out["retrieved_ids"]:
