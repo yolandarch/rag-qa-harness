@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.rag import REFUSAL, answer
+from app.rewrite import REWRITE_VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_ERROR_RATE = 0.2  # run dengan error di atas ini dianggap tidak valid
@@ -135,7 +136,7 @@ def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
         "",
         "## Konfigurasi",
         f"- Model: `{meta['model']}` | Embedding: `{meta['embedding']}`",
-        f"- Koleksi: `{meta['collection']}` | top_k: {meta['top_k']} | retrieval: `{meta['retrieval']}` | max_faq: {meta['max_faq']} | prompt: `{meta['prompt_version']}`",
+        f"- Koleksi: `{meta['collection']}` | top_k: {meta['top_k']} | retrieval: `{meta['retrieval']}` | max_faq: {meta['max_faq']} | prompt: `{meta['prompt_version']}` | rewrite: `{meta.get('rewrite', 'off')}`",
         f"- Golden set: `{meta['golden_file']}` (sha256 {meta['golden_sha']}, {total} kasus, "
         f"{meta['unverified']} belum diverifikasi manual)",
         "",
@@ -175,7 +176,21 @@ def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
             if r.get("forbidden_terms"):
                 lines.append(f"- Frasa terlarang muncul: {r['forbidden_terms']}")
             lines.append(f"- Jawaban: {r['answer'][:1500]}")
+            if r.get("rewrite"):
+                lines.append(f"- Query retrieval (rewrite): {r.get('search_query')}"
+                             + (" _(fallback ke pertanyaan asli)_" if r.get("rewrite_fallback") else ""))
             lines.append(f"- Chunk terambil: {', '.join(r['retrieved_ids'])}")
+        lines.append("")
+
+    rewritten = [r for r in rows if r.get("rewrite")]
+    if rewritten:
+        n_fb = sum(bool(r.get("rewrite_fallback")) for r in rewritten)
+        lines += ["## Query hasil rewrite (untuk audit)", "",
+                  f"Fallback ke pertanyaan asli: {n_fb}/{len(rewritten)}", "",
+                  "| ID | Status | Query retrieval |", "|---|---|---|"]
+        for r in rewritten:
+            q = (r.get("search_query") or "").replace("|", "/")
+            lines.append(f"| {r['id']} | {r['status']} | {q}{' (fallback)' if r.get('rewrite_fallback') else ''} |")
         lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -189,6 +204,7 @@ def main():
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
+    parser.add_argument("--rewrite", action="store_true", help="Exp 9: query rewriting untuk retrieval")
     parser.add_argument("--sleep", type=float, default=2.0, help="jeda antar pertanyaan (hindari rate limit)")
     parser.add_argument("--only", default="", help="jalankan ID tertentu saja, pisahkan dengan koma")
     parser.add_argument("--min-pass", type=float, default=0.0, help="exit code 1 jika pass rate di bawah ini (untuk CI)")
@@ -211,7 +227,7 @@ def main():
             print(f"[{i}/{len(cases)}] {case['id']} ...", end=" ", flush=True)
             row = {"id": case["id"], "category": case["category"], "question": case["question"]}
             try:
-                out = answer(case["question"], args.collection, args.top_k, args.retrieval, args.max_faq)
+                out = answer(case["question"], args.collection, args.top_k, args.retrieval, args.max_faq, args.rewrite)
                 model = out["model"]
                 emb_model = out.get("embedding_model")
                 prompt_v = out.get("prompt_version")
@@ -234,6 +250,7 @@ def main():
         "top_k": args.top_k,
         "retrieval": args.retrieval,
         "max_faq": args.max_faq,
+        "rewrite": REWRITE_VERSION if args.rewrite else "off",
         "golden_file": str(golden_path.relative_to(ROOT)).replace("\\", "/"),
         "golden_sha": hashlib.sha256(golden_path.read_bytes()).hexdigest()[:12],
         "unverified": sum(not c.get("verified", False) for c in cases),

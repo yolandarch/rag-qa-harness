@@ -27,6 +27,7 @@ import chromadb
 
 from app.embeddings import embed
 from app.rag import CHROMA_DIR, retrieve
+from app.rewrite import REWRITE_VERSION, rewrite_query
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -67,6 +68,8 @@ def main():
     parser.add_argument("--k", type=int, default=10, help="kedalaman pencarian untuk menghitung peringkat")
     parser.add_argument("--sleep", type=float, default=0.7, help="jeda antar request embedding")
     parser.add_argument("--max-faq", type=int, default=None, help="batas chunk FAQ di hasil (seperti di RAG)")
+    parser.add_argument("--rewrite", action="store_true",
+                        help="Exp 9: tulis ulang pertanyaan sebelum dicari (1 panggilan LLM kecil per kasus)")
     parser.add_argument("--show", default="", help="ID kasus (pisah koma) yang daftar top-k-nya dicetak")
     args = parser.parse_args()
 
@@ -84,11 +87,14 @@ def main():
 
     print(f"[retrieval] mode={args.mode} | k={args.k} | {len(cases)} kasus | embedding={emb_model}")
     ranks = {n: {} for n in args.collection}
+    queries = {}
     for i, case in enumerate(cases, 1):
-        qvec = embed([case["question"]], emb_model)[0]  # sekali, dipakai untuk semua koleksi
+        query, fb = rewrite_query(case["question"]) if args.rewrite else (case["question"], False)
+        queries[case["id"]] = (query, fb)
+        qvec = embed([query], emb_model)[0]  # sekali, dipakai untuk semua koleksi
         line = []
         for name in args.collection:
-            chunks, _ = retrieve(case["question"], name, args.k, args.mode, query_vec=qvec, max_faq=args.max_faq)
+            chunks, _ = retrieve(query, name, args.k, args.mode, query_vec=qvec, max_faq=args.max_faq)
             if case["id"] in {x.strip() for x in args.show.split(",")}:
                 print(f"    -- {case['id']} @ {name}")
                 for j, c in enumerate(chunks, 1):
@@ -98,7 +104,8 @@ def main():
             r = first_rank(chunks, case["relevant_pasal"])
             ranks[name][case["id"]] = r
             line.append(str(r) if r else "-")
-        print(f"[{i}/{len(cases)}] {case['id']:<9} {case['relevant_pasal']} -> " + " | ".join(line))
+        print(f"[{i}/{len(cases)}] {case['id']:<9} {case['relevant_pasal']} -> " + " | ".join(line)
+              + (f"   q={query!r}{' (fallback)' if fb else ''}" if args.rewrite else ""))
         time.sleep(args.sleep)
 
     def summary(rs: dict) -> dict:
@@ -111,7 +118,8 @@ def main():
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     short = {n: n.replace("banking_gemini-embedding-001_", "") for n in args.collection}
     lines = [f"# Retrieval eval `{run_id}`", "",
-             f"- Mode: `{args.mode}` | k: {args.k} | max_faq: {args.max_faq} | embedding: `{emb_model}` | {len(cases)} kasus "
+             f"- Mode: `{args.mode}` | k: {args.k} | max_faq: {args.max_faq} | rewrite: `{REWRITE_VERSION if args.rewrite else 'off'}` "
+             f"| embedding: `{emb_model}` | {len(cases)} kasus "
              "(kasus tanpa `relevant_pasal` dilewati)",
              f"- Golden set: `{golden_path.relative_to(ROOT).as_posix()}`", "",
              "## Ringkasan", "",
@@ -129,6 +137,9 @@ def main():
             r = ranks[n][c["id"]]
             cells.append("-" if r is None else (f"**{r}**" if r > 3 else str(r)))  # tebal = di luar top-3
         lines.append(f"| {c['id']} | {', '.join(c['relevant_pasal'])} | " + " | ".join(cells) + " |")
+    if args.rewrite:
+        lines += ["", "## Query hasil rewrite", "", "| ID | Query |", "|---|---|"]
+        lines += [f"| {cid} | {q.replace('|', '/')}{' (fallback)' if fb else ''} |" for cid, (q, fb) in queries.items()]
     out = ROOT / "reports" / f"retrieval_{run_id}.md"
     out.write_text("\n".join(lines), encoding="utf-8")
     print("\n" + "\n".join(lines[7:9 + len(args.collection)]))

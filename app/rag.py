@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from app.embeddings import DEFAULT_EMBEDDING, embed
+from app.rewrite import REWRITE_VERSION, rewrite_query
 
 ROOT = Path(__file__).resolve().parent.parent
 CHROMA_DIR = ROOT / ".chroma"
@@ -164,7 +165,7 @@ def build_context(chunks: list[dict], titles: dict) -> str:
 
 
 def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: int = 4,
-           retrieval: str = "dense", max_faq: int | None = None) -> dict:
+           retrieval: str = "dense", max_faq: int | None = None, rewrite: bool = False) -> dict:
     """Jalankan satu pertanyaan end-to-end. Mengembalikan dict yang nanti dipakai oleh evaluator."""
     # override=True: isi .env selalu menang atas variabel lama yang tertinggal di terminal
     load_dotenv(ROOT / ".env", override=True)
@@ -181,10 +182,14 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
     model = os.environ["LLM_MODEL"]
 
     t0 = time.perf_counter()
-    chunks, emb_model = retrieve(question, collection_name, top_k, retrieval, max_faq=max_faq)
+    # Rewrite hanya untuk PENCARIAN; model penjawab tetap menerima pertanyaan asli.
+    search_query, rewrite_fallback = rewrite_query(question) if rewrite else (question, False)
+    chunks, emb_model = retrieve(search_query, collection_name, top_k, retrieval, max_faq=max_faq)
     t_retrieve = time.perf_counter() - t0
     titles = load_doc_titles(collection_name)
-    print(f"[config] model={model} | embedding={emb_model} | collection={collection_name} | top_k={top_k} | retrieval={retrieval} | max_faq={max_faq} | prompt={PROMPT_VERSION}")
+    print(f"[config] model={model} | embedding={emb_model} | collection={collection_name} | top_k={top_k} | retrieval={retrieval} | max_faq={max_faq} | prompt={PROMPT_VERSION} | rewrite={REWRITE_VERSION if rewrite else 'off'}")
+    if rewrite:
+        print(f"[rewrite] {search_query!r}" + (" (fallback)" if rewrite_fallback else ""))
 
     t1 = time.perf_counter()
     resp = llm.chat.completions.create(
@@ -210,6 +215,9 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
         "top_k": top_k,
         "retrieval": retrieval,
         "max_faq": max_faq,
+        "rewrite": REWRITE_VERSION if rewrite else None,
+        "search_query": search_query,
+        "rewrite_fallback": rewrite_fallback,
         "latency_retrieve_s": round(t_retrieve, 3),
         "latency_generate_s": round(t_generate, 3),
         "prompt_tokens": getattr(usage, "prompt_tokens", None),
@@ -224,9 +232,10 @@ def main():
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
+    parser.add_argument("--rewrite", action="store_true", help="Exp 9: tulis ulang pertanyaan untuk retrieval")
     args = parser.parse_args()
 
-    out = answer(args.question, args.collection, args.top_k, args.retrieval, args.max_faq)
+    out = answer(args.question, args.collection, args.top_k, args.retrieval, args.max_faq, args.rewrite)
     print("\n=== JAWABAN ===\n" + out["answer"])
     print("\n=== CHUNK TERAMBIL ===")
     for cid in out["retrieved_ids"]:
