@@ -84,3 +84,24 @@ def test_fusion_mengirim_pertanyaan_asli_dan_rewrite(monkeypatch):
     out = rag.answer("pertanyaan asli", "banking_x_pasal", 3, "hybrid", rewrite="fusion")
     assert calls == {"query": "pertanyaan asli", "extra": ("query bersih",)}
     assert out["rewrite"].endswith("-fusion")
+
+
+def test_cache_dipakai_ulang(monkeypatch, tmp_path):
+    rw.rewrite_query.cache_clear()
+    monkeypatch.setattr(rw, "CACHE_PATH", tmp_path / "cache.json")
+    n = {"calls": 0}
+
+    class _C:
+        def __init__(self):
+            self.chat = self.completions = self
+
+        def create(self, **kw):
+            n["calls"] += 1
+            msg = type("M", (), {"content": '{"query": "query bersih"}'})()
+            return type("R", (), {"choices": [type("Ch", (), {"message": msg})()]})()
+    monkeypatch.setattr(rw, "_client", lambda: (_C(), "fake-model"))
+
+    assert rw.rewrite_query("q1") == ("query bersih", False)
+    rw.rewrite_query.cache_clear()  # simulasi proses baru: cache memori kosong, cache file tetap
+    assert rw.rewrite_query("q1") == ("query bersih", False)
+    assert n["calls"] == 1

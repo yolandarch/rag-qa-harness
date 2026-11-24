@@ -23,11 +23,17 @@ import json
 import os
 import re
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 REWRITE_VERSION = "rw-v1"
+# Hasil rewrite disimpan ke file supaya run berikutnya memakai query yang SAMA persis:
+# LLM tetap memberi output berbeda antar-panggilan walau temperature=0, dan itu membuat
+# perbandingan antar-konfigurasi (mis. top_k 3 vs 5) tercampur variasi rewrite.
+# Di-commit ke repo supaya hasil eksperimen bisa direproduksi. Hapus file untuk membuat ulang.
+CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "rewrite_cache.json"
 MAX_QUERY_CHARS = 300
 
 REWRITE_PROMPT = """Kamu mengubah pertanyaan nasabah menjadi QUERY PENCARIAN untuk dokumen regulasi jasa keuangan Indonesia.
@@ -75,11 +81,30 @@ def parse_query(raw: str) -> str | None:
     return q
 
 
+def _load_cache() -> dict:
+    try:
+        return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_cache(cache: dict) -> None:
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CACHE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
+    tmp.replace(CACHE_PATH)
+
+
 @lru_cache(maxsize=512)
 def rewrite_query(question: str) -> tuple[str, bool]:
-    """Kembalikan (query_untuk_retrieval, fallback). fallback=True berarti pertanyaan asli yang dipakai."""
+    """Kembalikan (query_untuk_retrieval, fallback). fallback=True berarti pertanyaan asli yang dipakai.
+    Hasil sukses di-cache per (versi prompt, model, pertanyaan); fallback tidak di-cache."""
     try:
         client, model = _client()
+        key = f"{REWRITE_VERSION}::{model}::{question}"
+        cache = _load_cache()
+        if key in cache:
+            return cache[key], False
         resp = client.chat.completions.create(
             model=model,
             temperature=0,
@@ -95,4 +120,29 @@ def rewrite_query(question: str) -> tuple[str, bool]:
     if q is None:
         print("[rewrite] output tidak valid, pakai pertanyaan asli")
         return question, True
+    cache = _load_cache()
+    cache[key] = q
+    _save_cache(cache)
     return q, False
+
+
+def seed_from_run(raw_jsonl: Path) -> int:
+    """Isi cache dari raw jsonl sebuah run eval, supaya run berikutnya memakai query yang sama persis."""
+    cache, n = _load_cache(), 0
+    for line in raw_jsonl.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        rw = row.get("rewrite") or ""
+        if not rw.startswith(REWRITE_VERSION) or row.get("rewrite_fallback") or not row.get("search_query"):
+            continue
+        cache[f"{REWRITE_VERSION}::{row['model']}::{row['question']}"] = row["search_query"]
+        n += 1
+    _save_cache(cache)
+    return n
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="Kelola cache query rewrite")
+    ap.add_argument("--seed-from", type=Path, required=True, help="reports/raw/<run_id>.jsonl")
+    args = ap.parse_args()
+    print(f"{seed_from_run(args.seed_from)} query masuk cache -> {CACHE_PATH}")
