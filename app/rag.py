@@ -68,8 +68,10 @@ def _bm25_index(collection_name: str):
     return BM25Okapi([tokenize(d) for d in data["documents"]]), data["ids"], data["documents"], data["metadatas"]
 
 
-def _dense(question: str, collection, emb_model: str, n: int) -> list[dict]:
-    if emb_model == DEFAULT_EMBEDDING:
+def _dense(question: str, collection, emb_model: str, n: int, query_vec=None) -> list[dict]:
+    if query_vec is not None:  # embedding pertanyaan sudah dihitung (hemat kuota saat membandingkan koleksi)
+        res = collection.query(query_embeddings=[query_vec], n_results=n)
+    elif emb_model == DEFAULT_EMBEDDING:
         res = collection.query(query_texts=[question], n_results=n)
     else:
         # pertanyaan WAJIB di-embed dengan model yang sama dengan dokumen
@@ -82,7 +84,8 @@ def _dense(question: str, collection, emb_model: str, n: int) -> list[dict]:
     ]
 
 
-def retrieve(question: str, collection_name: str, top_k: int, mode: str = "dense") -> tuple[list[dict], str]:
+def retrieve(question: str, collection_name: str, top_k: int, mode: str = "dense",
+             query_vec=None) -> tuple[list[dict], str]:
     """mode="dense": embedding saja. mode="hybrid": embedding + BM25, digabung dengan
     Reciprocal Rank Fusion (RRF), supaya chunk yang cocok kata-per-kata (mis. "lisan") ikut naik."""
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
@@ -90,12 +93,12 @@ def retrieve(question: str, collection_name: str, top_k: int, mode: str = "dense
     emb_model = (collection.metadata or {}).get("embedding_model", DEFAULT_EMBEDDING)
 
     if mode == "dense":
-        return _dense(question, collection, emb_model, top_k), emb_model
+        return _dense(question, collection, emb_model, top_k, query_vec), emb_model
     if mode != "hybrid":
         raise ValueError(f"mode retrieval tidak dikenal: {mode}")
 
     pool, k_rrf = max(20, top_k * 5), 60
-    dense = _dense(question, collection, emb_model, pool)
+    dense = _dense(question, collection, emb_model, pool, query_vec)
     bm25, ids, docs, metas = _bm25_index(collection_name)
     scores = bm25.get_scores(tokenize(question))
     bm25_rank = sorted(range(len(ids)), key=lambda i: scores[i], reverse=True)[:pool]
