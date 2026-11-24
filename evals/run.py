@@ -185,7 +185,7 @@ def write_report(path: Path, meta: dict, rows: list[dict]) -> float:
 def main():
     parser = argparse.ArgumentParser(description="Jalankan golden set dan buat report")
     parser.add_argument("--domain", default="banking")
-    parser.add_argument("--collection", default="banking_gemini-embedding-001_cs800_ov150")
+    parser.add_argument("--collection", default="banking_gemini-embedding-001_pasal")
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")

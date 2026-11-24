@@ -220,7 +220,7 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
 def main():
     parser = argparse.ArgumentParser(description="Tanya RAG dari command line")
     parser.add_argument("question")
-    parser.add_argument("--collection", default="banking_gemini-embedding-001_cs800_ov150")
+    parser.add_argument("--collection", default="banking_gemini-embedding-001_pasal")
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")

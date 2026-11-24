@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_eval:
+        description: "Jalankan eval golden set sungguhan (butuh secrets & kuota API)"
+        type: boolean
+        default: false
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Daftar paket eksplisit (bukan requirements.txt hasil pip freeze di Windows,
+      # yang bisa berisi paket khusus platform).
+      - run: pip install chromadb pypdf python-dotenv openai rank_bm25 pytest
+      - run: pytest -q
+
+  # Quality gate opsional, hanya dijalankan manual (Actions > CI > Run workflow > run_eval).
+  # Butuh: secrets LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, EMB_BASE_URL, EMB_API_KEY,
+  # dan dokumen PDF + koleksi Chroma (tidak ada di repo), jadi job ini adalah kerangka
+  # untuk dilengkapi nanti, bukan sesuatu yang langsung jalan.
+  eval:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_eval
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install chromadb pypdf python-dotenv openai rank_bm25
+      - run: echo "TODO: unduh PDF (lihat data/banking/SOURCES.md), ingest, lalu evals.run --min-pass 0.8"
