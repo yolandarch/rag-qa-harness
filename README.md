@@ -1,5 +1,7 @@
 # rag-qa-harness
 
+[![CI](https://github.com/yolandarch/rag-qa-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/yolandarch/rag-qa-harness/actions/workflows/ci.yml)
+
 > **EN summary.** A regression-testing and evaluation harness for an Indonesian-language RAG assistant that answers customer questions from banking regulation (OJK **POJK 22/2023** on consumer protection). The project is less about the chatbot and more about *measuring* it: a verified golden set, deterministic checks with negative assertions, an audited LLM-as-judge, a retrieval-only evaluator (hit@k / MRR), and 9 documented experiments, including the ones that failed.
 
 Harness pengujian dan evaluasi untuk sistem RAG berbahasa Indonesia. Kasus uji: asisten layanan nasabah yang menjawab dari **POJK 22/2023 tentang Pelindungan Konsumen dan Masyarakat di Sektor Jasa Keuangan** beserta FAQ resmi OJK.
