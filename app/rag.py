@@ -102,34 +102,41 @@ def _cap_faq(ranked: list[dict], top_k: int, max_faq: int | None) -> list[dict]:
 
 
 def retrieve(question: str, collection_name: str, top_k: int, mode: str = "dense",
-             query_vec=None, max_faq: int | None = None) -> tuple[list[dict], str]:
+             query_vec=None, max_faq: int | None = None,
+             extra_queries: tuple[str, ...] = (), extra_vecs: list | None = None) -> tuple[list[dict], str]:
     """mode="dense": embedding saja. mode="hybrid": embedding + BM25, digabung dengan
-    Reciprocal Rank Fusion (RRF), supaya chunk yang cocok kata-per-kata (mis. "lisan") ikut naik."""
+    Reciprocal Rank Fusion (RRF), supaya chunk yang cocok kata-per-kata (mis. "lisan") ikut naik.
+
+    extra_queries (Exp 9b, multi-query): query tambahan (mis. hasil rewrite) yang daftar hasilnya
+    ikut digabung dengan RRF. Tanpa extra_queries, perilakunya sama persis dengan sebelumnya."""
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     collection = client.get_collection(collection_name)
     emb_model = (collection.metadata or {}).get("embedding_model", DEFAULT_EMBEDDING)
-
-    if mode == "dense":
-        pool = top_k if max_faq is None else max(20, top_k * 5)
-        return _cap_faq(_dense(question, collection, emb_model, pool, query_vec), top_k, max_faq), emb_model
-    if mode != "hybrid":
+    if mode not in ("dense", "hybrid"):
         raise ValueError(f"mode retrieval tidak dikenal: {mode}")
 
-    pool, k_rrf = max(20, top_k * 5), 60
-    dense = _dense(question, collection, emb_model, pool, query_vec)
-    bm25, ids, docs, metas = _bm25_index(collection_name)
-    scores = bm25.get_scores(tokenize(question))
-    bm25_rank = sorted(range(len(ids)), key=lambda i: scores[i], reverse=True)[:pool]
+    queries = [question, *extra_queries]
+    vecs = [query_vec, *(extra_vecs or [None] * len(extra_queries))]
 
+    if mode == "dense" and len(queries) == 1:
+        pool = top_k if max_faq is None else max(20, top_k * 5)
+        return _cap_faq(_dense(question, collection, emb_model, pool, query_vec), top_k, max_faq), emb_model
+
+    pool, k_rrf = max(20, top_k * 5), 60
     fused, info = {}, {}
-    for rank, c in enumerate(dense, 1):
-        fused[c["id"]] = fused.get(c["id"], 0) + 1 / (k_rrf + rank)
-        info[c["id"]] = c
-    for rank, i in enumerate(bm25_rank, 1):
-        if scores[i] <= 0:
-            break
-        fused[ids[i]] = fused.get(ids[i], 0) + 1 / (k_rrf + rank)
-        info.setdefault(ids[i], {"id": ids[i], "text": docs[i], "metadata": metas[i], "distance": None})
+    for q, vec in zip(queries, vecs):
+        for rank, c in enumerate(_dense(q, collection, emb_model, pool, vec), 1):
+            fused[c["id"]] = fused.get(c["id"], 0) + 1 / (k_rrf + rank)
+            info.setdefault(c["id"], c)
+        if mode == "dense":
+            continue
+        bm25, ids, docs, metas = _bm25_index(collection_name)
+        scores = bm25.get_scores(tokenize(q))
+        for rank, i in enumerate(sorted(range(len(ids)), key=lambda i: scores[i], reverse=True)[:pool], 1):
+            if scores[i] <= 0:
+                break
+            fused[ids[i]] = fused.get(ids[i], 0) + 1 / (k_rrf + rank)
+            info.setdefault(ids[i], {"id": ids[i], "text": docs[i], "metadata": metas[i], "distance": None})
 
     ranked = [info[cid] for cid in sorted(fused, key=fused.get, reverse=True)]
     return _cap_faq(ranked, top_k, max_faq), emb_model
@@ -165,7 +172,9 @@ def build_context(chunks: list[dict], titles: dict) -> str:
 
 
 def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: int = 4,
-           retrieval: str = "dense", max_faq: int | None = None, rewrite: bool = False) -> dict:
+           retrieval: str = "dense", max_faq: int | None = None, rewrite: str | None = None) -> dict:
+    """rewrite: None (mati) | "replace" (cari pakai query hasil rewrite saja)
+    | "fusion" (cari pakai pertanyaan asli DAN hasil rewrite, digabung RRF)."""
     """Jalankan satu pertanyaan end-to-end. Mengembalikan dict yang nanti dipakai oleh evaluator."""
     # override=True: isi .env selalu menang atas variabel lama yang tertinggal di terminal
     load_dotenv(ROOT / ".env", override=True)
@@ -183,11 +192,18 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
 
     t0 = time.perf_counter()
     # Rewrite hanya untuk PENCARIAN; model penjawab tetap menerima pertanyaan asli.
+    if rewrite not in (None, "replace", "fusion"):
+        raise ValueError(f"mode rewrite tidak dikenal: {rewrite}")
     search_query, rewrite_fallback = rewrite_query(question) if rewrite else (question, False)
-    chunks, emb_model = retrieve(search_query, collection_name, top_k, retrieval, max_faq=max_faq)
+    if rewrite == "fusion" and not rewrite_fallback:
+        chunks, emb_model = retrieve(question, collection_name, top_k, retrieval, max_faq=max_faq,
+                                     extra_queries=(search_query,))
+    else:
+        chunks, emb_model = retrieve(search_query, collection_name, top_k, retrieval, max_faq=max_faq)
+    rewrite_label = f"{REWRITE_VERSION}-{rewrite}" if rewrite else None
     t_retrieve = time.perf_counter() - t0
     titles = load_doc_titles(collection_name)
-    print(f"[config] model={model} | embedding={emb_model} | collection={collection_name} | top_k={top_k} | retrieval={retrieval} | max_faq={max_faq} | prompt={PROMPT_VERSION} | rewrite={REWRITE_VERSION if rewrite else 'off'}")
+    print(f"[config] model={model} | embedding={emb_model} | collection={collection_name} | top_k={top_k} | retrieval={retrieval} | max_faq={max_faq} | prompt={PROMPT_VERSION} | rewrite={rewrite_label or 'off'}")
     if rewrite:
         print(f"[rewrite] {search_query!r}" + (" (fallback)" if rewrite_fallback else ""))
 
@@ -215,7 +231,7 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
         "top_k": top_k,
         "retrieval": retrieval,
         "max_faq": max_faq,
-        "rewrite": REWRITE_VERSION if rewrite else None,
+        "rewrite": rewrite_label,
         "search_query": search_query,
         "rewrite_fallback": rewrite_fallback,
         "latency_retrieve_s": round(t_retrieve, 3),
@@ -232,7 +248,8 @@ def main():
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
-    parser.add_argument("--rewrite", action="store_true", help="Exp 9: tulis ulang pertanyaan untuk retrieval")
+    parser.add_argument("--rewrite", choices=["replace", "fusion"], default=None,
+                        help="Exp 9: replace = cari pakai hasil rewrite; fusion = asli + rewrite digabung RRF")
     args = parser.parse_args()
 
     out = answer(args.question, args.collection, args.top_k, args.retrieval, args.max_faq, args.rewrite)

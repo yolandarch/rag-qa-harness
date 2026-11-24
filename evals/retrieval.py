@@ -68,8 +68,9 @@ def main():
     parser.add_argument("--k", type=int, default=10, help="kedalaman pencarian untuk menghitung peringkat")
     parser.add_argument("--sleep", type=float, default=0.7, help="jeda antar request embedding")
     parser.add_argument("--max-faq", type=int, default=None, help="batas chunk FAQ di hasil (seperti di RAG)")
-    parser.add_argument("--rewrite", action="store_true",
-                        help="Exp 9: tulis ulang pertanyaan sebelum dicari (1 panggilan LLM kecil per kasus)")
+    parser.add_argument("--rewrite", choices=["replace", "fusion"], default=None,
+                        help="Exp 9: replace = cari pakai hasil rewrite; fusion = asli + rewrite digabung RRF "
+                             "(1 panggilan LLM kecil per kasus)")
     parser.add_argument("--show", default="", help="ID kasus (pisah koma) yang daftar top-k-nya dicetak")
     args = parser.parse_args()
 
@@ -91,10 +92,16 @@ def main():
     for i, case in enumerate(cases, 1):
         query, fb = rewrite_query(case["question"]) if args.rewrite else (case["question"], False)
         queries[case["id"]] = (query, fb)
-        qvec = embed([query], emb_model)[0]  # sekali, dipakai untuk semua koleksi
+        fusion = args.rewrite == "fusion" and not fb
+        texts = [case["question"], query] if fusion else [query]
+        vecs = embed(texts, emb_model)  # sekali, dipakai untuk semua koleksi
         line = []
         for name in args.collection:
-            chunks, _ = retrieve(query, name, args.k, args.mode, query_vec=qvec, max_faq=args.max_faq)
+            if fusion:
+                chunks, _ = retrieve(case["question"], name, args.k, args.mode, query_vec=vecs[0],
+                                     max_faq=args.max_faq, extra_queries=(query,), extra_vecs=[vecs[1]])
+            else:
+                chunks, _ = retrieve(query, name, args.k, args.mode, query_vec=vecs[0], max_faq=args.max_faq)
             if case["id"] in {x.strip() for x in args.show.split(",")}:
                 print(f"    -- {case['id']} @ {name}")
                 for j, c in enumerate(chunks, 1):
@@ -115,10 +122,11 @@ def main():
         mrr = sum(1 / r for r in vals if r) / n
         return {"hit@1": hit(1), "hit@3": hit(3), "hit@5": hit(5), f"hit@{args.k}": hit(args.k), "mrr": mrr}
 
+    rw_label = f"{REWRITE_VERSION}-{args.rewrite}" if args.rewrite else "off"
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     short = {n: n.replace("banking_gemini-embedding-001_", "") for n in args.collection}
     lines = [f"# Retrieval eval `{run_id}`", "",
-             f"- Mode: `{args.mode}` | k: {args.k} | max_faq: {args.max_faq} | rewrite: `{REWRITE_VERSION if args.rewrite else 'off'}` "
+             f"- Mode: `{args.mode}` | k: {args.k} | max_faq: {args.max_faq} | rewrite: `{rw_label}` "
              f"| embedding: `{emb_model}` | {len(cases)} kasus "
              "(kasus tanpa `relevant_pasal` dilewati)",
              f"- Golden set: `{golden_path.relative_to(ROOT).as_posix()}`", "",

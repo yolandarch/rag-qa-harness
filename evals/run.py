@@ -204,7 +204,8 @@ def main():
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
-    parser.add_argument("--rewrite", action="store_true", help="Exp 9: query rewriting untuk retrieval")
+    parser.add_argument("--rewrite", choices=["replace", "fusion"], default=None,
+                        help="Exp 9: replace = cari pakai hasil rewrite; fusion = asli + rewrite digabung RRF")
     parser.add_argument("--sleep", type=float, default=2.0, help="jeda antar pertanyaan (hindari rate limit)")
     parser.add_argument("--only", default="", help="jalankan ID tertentu saja, pisahkan dengan koma")
     parser.add_argument("--min-pass", type=float, default=0.0, help="exit code 1 jika pass rate di bawah ini (untuk CI)")
@@ -250,7 +251,7 @@ def main():
         "top_k": args.top_k,
         "retrieval": args.retrieval,
         "max_faq": args.max_faq,
-        "rewrite": REWRITE_VERSION if args.rewrite else "off",
+        "rewrite": f"{REWRITE_VERSION}-{args.rewrite}" if args.rewrite else "off",
         "golden_file": str(golden_path.relative_to(ROOT)).replace("\\", "/"),
         "golden_sha": hashlib.sha256(golden_path.read_bytes()).hexdigest()[:12],
         "unverified": sum(not c.get("verified", False) for c in cases),
