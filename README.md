@@ -46,7 +46,7 @@ Jebakan yang sengaja dibuat, antara lain:
 - **Unanswerable yang terdengar relevan**: batas bunga kartu kredit, jangka waktu putusan LAPS. Keduanya tidak diatur di POJK 22/2023.
 - **Adversarial halus**: mengaku petugas OJK dan menyuruh mengabaikan dokumen.
 
-> **Status verifikasi: 2 dari 32 kasus sudah diverifikasi manual.** Sebagian besar kasus disusun dari teks PDF dengan bantuan AI dan masih berstatus draf. Angka di bawah harus dibaca dengan keterbatasan ini.
+> **Status verifikasi: 32/32 kasus diverifikasi manual** terhadap PDF sumber dengan `evals/verify.py` (kunci jawaban, `source_quote`, dan halaman dicocokkan satu per satu). Verifikasi dilakukan oleh satu orang (penulis), belum ada pemeriksa kedua.
 
 ## Riwayat eksperimen
 
@@ -85,7 +85,7 @@ Diagnosis lewat `--show`: pada kegagalan yang tersisa (S001, S002, A002), pasal 
 
 ## Keterbatasan (dibaca sebelum mengutip angka)
 
-- **Golden set kecil dan sebagian besar belum terverifikasi** (2/32). Satu kasus = ~3%.
+- **Golden set kecil (32 kasus) dan diverifikasi oleh satu orang.** Satu kasus = ~3%. Kasus-kasusnya awalnya disusun dengan bantuan AI dari teks PDF, lalu dicek manual.
 - **Sebagian besar konfigurasi baru dijalankan 1–2 kali.** Sistem ini terbukti **tidak deterministik**: dengan `temperature=0` dan konfigurasi identik, F002 dan F005 lolos di satu run dan gagal di run lain. Bahkan embedding query dari API sedikit bervariasi antar-panggilan.
 - **Cek kata kunci kalah oleh imbuhan bahasa Indonesia** ("dilarang"/"melarang", "bertanggung jawab"/"tanggung jawab"). Ini terjadi berulang kali dan dicatat sebagai kesalahan evaluator, bukan kesalahan sistem.
 - **Metrik retrieval diukur per pasal, bukan per ayat**, dan **chunk FAQ yang berisi jawaban tidak dihitung relevan**. Hit@k bisa menyatakan "berhasil" walau ayat yang dibutuhkan ada di chunk lanjutan (contoh: D001).
