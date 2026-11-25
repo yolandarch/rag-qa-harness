@@ -245,12 +245,15 @@ def main():
     parser = argparse.ArgumentParser(description="Tanya RAG dari command line")
     parser.add_argument("question")
     parser.add_argument("--collection", default="banking_gemini-embedding-001_pasal")
-    parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--top-k", type=int, default=5)  # konfigurasi terbaik Exp 11 (fusion top5)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
-    parser.add_argument("--rewrite", choices=["replace", "fusion"], default=None,
-                        help="Exp 9: replace = cari pakai hasil rewrite; fusion = asli + rewrite digabung RRF")
+    parser.add_argument("--rewrite", choices=["off", "replace", "fusion"], default="fusion",
+                        help="Exp 9: off = tanpa rewrite (baseline); replace = cari pakai hasil rewrite; "
+                             "fusion = asli + rewrite digabung RRF (default, terbaik di Exp 11)")
     args = parser.parse_args()
+    if args.rewrite == "off":
+        args.rewrite = None
 
     out = answer(args.question, args.collection, args.top_k, args.retrieval, args.max_faq, args.rewrite)
     print("\n=== JAWABAN ===\n" + out["answer"])

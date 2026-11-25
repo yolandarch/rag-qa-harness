@@ -201,15 +201,18 @@ def main():
     parser = argparse.ArgumentParser(description="Jalankan golden set dan buat report")
     parser.add_argument("--domain", default="banking")
     parser.add_argument("--collection", default="banking_gemini-embedding-001_pasal")
-    parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--top-k", type=int, default=5)  # konfigurasi terbaik Exp 11 (fusion top5)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
-    parser.add_argument("--rewrite", choices=["replace", "fusion"], default=None,
-                        help="Exp 9: replace = cari pakai hasil rewrite; fusion = asli + rewrite digabung RRF")
+    parser.add_argument("--rewrite", choices=["off", "replace", "fusion"], default="fusion",
+                        help="Exp 9: off = tanpa rewrite (baseline); replace = cari pakai hasil rewrite; "
+                             "fusion = asli + rewrite digabung RRF (default, terbaik di Exp 11)")
     parser.add_argument("--sleep", type=float, default=2.0, help="jeda antar pertanyaan (hindari rate limit)")
     parser.add_argument("--only", default="", help="jalankan ID tertentu saja, pisahkan dengan koma")
     parser.add_argument("--min-pass", type=float, default=0.0, help="exit code 1 jika pass rate di bawah ini (untuk CI)")
     args = parser.parse_args()
+    if args.rewrite == "off":
+        args.rewrite = None
 
     golden_path = ROOT / "data" / args.domain / "golden.jsonl"
     cases = load_golden(golden_path)

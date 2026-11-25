@@ -90,7 +90,7 @@ Rewriter hanya dipakai untuk **pencarian**. Model penjawab tetap menerima pertan
 - **Output LLM tidak deterministik walau `temperature=0`.** Query hasil rewrite berbeda antar-run, dan pada satu run perbedaan itu saja sudah membuat F011 gagal. Hasil rewrite kini di-cache (`data/rewrite_cache.json`) supaya perbandingan antar-konfigurasi memakai query yang sama.
 - **S001 salah di semua konfigurasi**: model menyatakan POJK 6/2022 "tetap berlaku selama tidak bertentangan". Pada top5, Pasal 121 (yang mencabutnya) sudah ikut terambil, jadi ini kegagalan **generasi**, bukan retrieval: model mencampur Pasal 120 (ketentuan pelaksana lama tetap berlaku) dengan Pasal 121 (POJK 6/2022 dicabut). Ini kegagalan paling berbahaya yang masih terbuka.
 
-Default kode masih `top_k=3` tanpa rewrite. Konfigurasi terbaik pada run ini: `--rewrite fusion --top-k 5`. Setiap konfigurasi baru dijalankan satu kali.
+Default kode adalah konfigurasi terbaik ini (`--rewrite fusion --top-k 5`). Baseline: `--rewrite off --top-k 3`. Setiap konfigurasi baru dijalankan satu kali.
 
 ## Keputusan desain evaluator
 
