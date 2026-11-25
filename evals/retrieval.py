@@ -1,19 +1,8 @@
-"""
-Evaluasi RETRIEVAL saja (tanpa LLM): apakah pasal yang benar masuk ke hasil pencarian, dan di peringkat berapa.
+"""Evaluasi retrieval tanpa memanggil model penjawab: peringkat pasal yang benar, hit@k dan MRR.
 
-Pemakaian (dari root repo):
-    python -m evals.retrieval --domain banking \\
-        --collection banking_gemini-embedding-001_cs800_ov150 \\
-        --collection banking_gemini-embedding-001_pasal
+    python -m evals.retrieval --domain banking --collection banking_gemini-embedding-001_pasal [--rewrite fusion] [--show BNK-S001]
 
-    python -m evals.retrieval ... --mode dense --k 10
-
-Butuh field "relevant_pasal" di golden set, mis. ["Pasal 117"]. Kasus tanpa field ini dilewati
-(mis. unanswerable). Hanya chunk BATANG TUBUH yang dihitung relevan (bagian Penjelasan tidak).
-Metadata "pasal" bisa berupa rentang ("Pasal 74-75" dari chunking lama), dan dihitung cocok
-jika nomor pasal target ada di dalam rentang itu.
-
-Biaya: 1 request embedding per pertanyaan (dipakai ulang untuk semua koleksi). Nol token LLM.
+Kasus tanpa `relevant_pasal` dilewati. Chunk bagian Penjelasan tidak dihitung relevan.
 """
 
 import argparse
@@ -94,7 +83,7 @@ def main():
         queries[case["id"]] = (query, fb)
         fusion = args.rewrite == "fusion" and not fb
         texts = [case["question"], query] if fusion else [query]
-        vecs = embed(texts, emb_model)  # sekali, dipakai untuk semua koleksi
+        vecs = embed(texts, emb_model)
         line = []
         for name in args.collection:
             if fusion:
@@ -143,7 +132,7 @@ def main():
         cells = []
         for n in args.collection:
             r = ranks[n][c["id"]]
-            cells.append("-" if r is None else (f"**{r}**" if r > 3 else str(r)))  # tebal = di luar top-3
+            cells.append("-" if r is None else (f"**{r}**" if r > 3 else str(r)))
         lines.append(f"| {c['id']} | {', '.join(c['relevant_pasal'])} | " + " | ".join(cells) + " |")
     if args.rewrite:
         lines += ["", "## Query hasil rewrite", "", "| ID | Query |", "|---|---|"]

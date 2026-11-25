@@ -1,21 +1,8 @@
-"""Verifikasi manual golden set terhadap PDF sumber, satu kasus per layar.
+"""Cek golden set terhadap PDF sumber, satu kasus per layar.
 
-Untuk setiap kasus yang belum terverifikasi, ditampilkan:
-pertanyaan, kunci jawaban, kata kunci, catatan, source_quote,
-lalu teks asli halaman POJK yang disebut di `source` (dan jawaban FAQ bila disebut),
-dengan kata kunci di-highlight.
+    python -m evals.verify --domain banking [--only BNK-F006]
 
-Perintah:
-  y  = cocok dengan dokumen -> verified: true
-  n  = ada yang salah -> verified: false + catatan di "verify_note" (perbaiki manual nanti)
-  s  = lewati dulu
-  /kata = cari kata/frasa di seluruh POJK (berguna untuk kasus unanswerable)
-  p 61 = tampilkan halaman POJK tertentu
-  q  = keluar (keputusan yang sudah diambil sudah tersimpan)
-
-Contoh:
-  python -m evals.verify --domain banking
-  python -m evals.verify --domain banking --only BNK-F006 BNK-F013
+y = cocok, n = salah (tulis catatan), s = lewati, /kata = cari di POJK, p 61 = tampilkan halaman, q = keluar.
 """
 import argparse
 import json
@@ -43,7 +30,7 @@ def load_pages(path: Path) -> list[str]:
 
 
 def parse_pages(source: str) -> list[int]:
-    """'... hal. 61-62; FAQ no. 11' -> [61, 62]. Nomor = urutan halaman PDF (mulai 1)."""
+    """'... hal. 61-62; FAQ no. 11' -> [61, 62]"""
     pages = []
     for a, b in re.findall(r"hal\.\s*(\d+)(?:\s*-\s*(\d+))?", source or ""):
         a, b = int(a), int(b or a)
@@ -60,7 +47,6 @@ def parse_faq(source: str) -> list[int]:
 
 
 def faq_entry(faq_text: str, n: int) -> str:
-    """Ambil teks FAQ nomor n sampai sebelum nomor n+1 (heuristik)."""
     start = re.search(rf"(?m)^\s*{n}\s*[.)]\s", faq_text)
     if not start:
         return f"{RED}(FAQ no. {n} tidak ketemu otomatis — cek PDF FAQ manual){RST}"
@@ -77,7 +63,7 @@ def flatten_terms(must_include) -> list[str]:
 
 
 def term_pattern(term: str) -> str:
-    """'10 hari kerja' juga cocok dengan '10 (sepuluh) hari\nkerja' (gaya penulisan regulasi)."""
+    """'10 hari kerja' juga cocok dengan '10 (sepuluh) hari\nkerja'."""
     parts = []
     for tok in term.split():
         p = re.escape(tok)
@@ -104,13 +90,12 @@ def squash(s: str) -> str:
 
 
 def quote_found(quote: str, pages_text: str) -> str:
-    """Cek otomatis: apakah potongan-potongan source_quote (dipisah '...') ada di halaman."""
-    quote = re.sub(r"\[hal\.\s*\d+\]", " ", quote or "")  # penanda pindah halaman
+    quote = re.sub(r"\[hal\.\s*\d+\]", " ", quote or "")
     parts = [p for p in (squash(x) for x in quote.split("...")) if len(p) >= 15]
     if not parts:
         return f"{DIM}(tidak ada source_quote untuk dicek otomatis){RST}"
     body = "\n".join(l for l in pages_text.splitlines() if not NOISE_LINE.match(l.strip()))
-    hay = squash(body)  # header/footer dibuang supaya kalimat lintas halaman tersambung
+    hay = squash(body)
     hits = sum(p in hay for p in parts)
     color = GRN if hits == len(parts) else RED
     return f"{color}source_quote ditemukan di halaman: {hits}/{len(parts)} potongan{RST}"
@@ -222,7 +207,7 @@ def main():
         else:
             case["verified"] = False
             case["verify_note"] = input("Apa yang salah? > ").strip()
-        save(golden, rows)  # simpan tiap keputusan, aman kalau berhenti di tengah
+        save(golden, rows)
         print(f"{GRN}tersimpan.{RST}")
 
     done = sum(bool(r.get("verified")) for r in rows)

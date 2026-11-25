@@ -1,15 +1,6 @@
-"""
-Ingest PDF dokumen ke ChromaDB.
+"""Ingest PDF ke Chroma dengan chunk per N karakter (chunking lama; yang dipakai sekarang ingest_pasal.py).
 
-Pemakaian (dari root repo):
-    python -m app.ingest --domain banking                                   # baseline (embedding bawaan Chroma)
-    python -m app.ingest --domain banking --embedding gemini-embedding-001  # embedding lewat API
-    python -m app.ingest --domain banking --chunk-size 1200 --overlap 200 --reset
-
-Alur: PDF -> teks per halaman -> chunk (dengan overlap) -> embedding -> simpan ke Chroma
-beserta metadata (nama file, nomor halaman), supaya jawaban bisa dilacak sumbernya.
-Nama model embedding disimpan di metadata koleksi, sehingga rag.py otomatis memakai
-model yang sama untuk meng-embed pertanyaan.
+    python -m app.ingest --domain banking --embedding gemini-embedding-001 [--chunk-size N --overlap N] [--reset]
 """
 
 import argparse
@@ -26,7 +17,6 @@ CHROMA_DIR = ROOT / ".chroma"
 
 
 def clean_text(text: str) -> str:
-    """Rapikan teks hasil ekstraksi PDF: gabungkan spasi berlebih, buang baris kosong beruntun."""
     text = text.replace(" ", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -34,7 +24,6 @@ def clean_text(text: str) -> str:
 
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
-    """Potong teks per karakter dengan overlap. Usahakan memotong di batas kalimat/baris."""
     if overlap >= chunk_size:
         raise ValueError("overlap harus lebih kecil dari chunk_size")
 
@@ -43,7 +32,7 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
     while start < len(text):
         end = min(start + chunk_size, len(text))
         if end < len(text):
-            # mundur ke titik/baris baru terdekat agar kalimat tidak terpotong di tengah
+            # mundur ke akhir kalimat atau baris terdekat
             cut = max(text.rfind(". ", start, end), text.rfind("\n", start, end))
             if cut > start + chunk_size // 2:
                 end = cut + 1
@@ -57,15 +46,14 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
 
 
 def load_pdf_chunks(pdf_path: Path, chunk_size: int, overlap: int):
-    """Hasilkan (id, teks, metadata) untuk setiap chunk. Chunk tidak melintasi halaman,
-    supaya metadata nomor halaman selalu akurat."""
+    # chunk tidak melintasi halaman, jadi nomor halamannya pasti benar
     reader = PdfReader(str(pdf_path))
     for page_num, page in enumerate(reader.pages, start=1):
         text = clean_text(page.extract_text() or "")
         if not text:
-            continue  # halaman kosong / hasil scan tanpa teks
+            continue  # halaman kosong atau hasil scan
         for i, chunk in enumerate(chunk_text(text, chunk_size, overlap)):
-            # ID deterministik: ingest ulang tidak bikin duplikat, dan bisa dirujuk di golden set
+            # ID tetap, jadi ingest ulang tidak bikin duplikat dan bisa dirujuk dari golden set
             chunk_id = f"{pdf_path.stem}-p{page_num}-c{i}"
             yield chunk_id, chunk, {"source": pdf_path.name, "page": page_num, "chunk": i}
 
@@ -91,7 +79,7 @@ def main():
         try:
             client.delete_collection(name)
         except Exception:
-            pass  # koleksi belum ada
+            pass
     collection = client.get_or_create_collection(
         name,
         metadata={"embedding_model": args.embedding, "chunk_size": args.chunk_size, "overlap": args.overlap},
@@ -110,7 +98,6 @@ def main():
 
         vectors = None if args.embedding == DEFAULT_EMBEDDING else embed(texts, args.embedding)
 
-        # upsert per batch agar aman untuk dokumen besar
         for b in range(0, len(ids), 100):
             kwargs = {"ids": ids[b:b + 100], "documents": texts[b:b + 100], "metadatas": metas[b:b + 100]}
             if vectors is not None:

@@ -1,22 +1,9 @@
-"""
-Ingest berbasis STRUKTUR dokumen hukum (Eksperimen 8).
+"""Ingest per pasal/ayat.
 
-Masalah chunking lama (per 800 karakter, tidak melintasi halaman):
-- kalimat terpotong di batas halaman (F006: ayat (6) hal. 61/62),
-- kalimat terpotong di tengah halaman karena setiap baris PDF berakhir dengan "\\n" (F013, F016),
-- pasal pendek tenggelam di dalam chunk yang berisi pasal lain (S002: Pasal 117).
+Semua halaman disambung dulu (header/footer dibuang), lalu dipotong per pasal. Pasal yang panjang
+dikelompokkan per ayat. FAQ dipotong per nomor pertanyaan. ID chunk: <file>-p<halaman_awal>-c<i>.
 
-Pendekatan baru:
-- Teks semua halaman disambung dulu (header/footer halaman dibuang), lalu dipotong per PASAL.
-- Pasal yang panjang dipotong per AYAT ("(1)", "(2)", ...), dikelompokkan sampai batas ukuran.
-- Potongan lanjutan diberi awalan "Pasal N (lanjutan)" supaya embedding & BM25 tetap tahu konteksnya.
-- FAQ dipotong per NOMOR PERTANYAAN.
-- Metadata: source, page (halaman awal), page_end, pasal, bagian (Pembukaan/Batang Tubuh/Penjelasan/FAQ).
-- ID tetap berformat "<file>-p<halaman_awal>-c<i>" supaya kompatibel dengan sitasi & evaluator.
-
-Pemakaian:
-    python -m app.ingest_pasal --domain banking --embedding gemini-embedding-001 --dry-run
-    python -m app.ingest_pasal --domain banking --embedding gemini-embedding-001
+    python -m app.ingest_pasal --domain banking --embedding gemini-embedding-001 [--dry-run]
 """
 
 import argparse
@@ -26,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CHROMA_DIR = ROOT / ".chroma"
 
-MAX_CHARS = 1500  # target ukuran maksimal satu chunk
+MAX_CHARS = 1500
 
 NOISE_LINE = re.compile(
     r"^\s*(\d{4},\s*No\.\s*\d+/OJK.*|-\s*\d+\s*-|\[?www\.peraturan\.go\.id.*|\d+\s*)$", re.IGNORECASE
@@ -50,7 +37,6 @@ def clean_page(text: str) -> list[str]:
 
 
 def join_pages(pages: list[str]) -> list[tuple[str, int]]:
-    """Gabungkan semua halaman menjadi daftar (baris, nomor_halaman)."""
     out = []
     for page_num, text in enumerate(pages, start=1):
         out.extend((line, page_num) for line in clean_page(text))
@@ -58,10 +44,8 @@ def join_pages(pages: list[str]) -> list[tuple[str, int]]:
 
 
 def split_long(lines: list[tuple[str, int]], max_chars: int) -> list[list[tuple[str, int]]]:
-    """Kelompokkan baris per AYAT sampai batas ukuran; ayat yang sangat panjang dipotong per baris."""
-    # 1) bentuk blok per ayat
-    # Ayat baru hanya jika nomornya berurutan: baris yang kebetulan diawali "(5)" karena
-    # pemenggalan baris (mis. "...dimaksud pada ayat\n(5) merupakan PUJK") bukan awal ayat.
+    # Ayat baru hanya kalau nomornya berurutan. Baris yang kebetulan diawali "(5)" karena
+    # pemenggalan ("...dimaksud pada ayat\n(5) merupakan PUJK") bukan awal ayat.
     blocks, cur, last = [], [], 0
     for item in lines:
         m = AYAT_START.match(item[0])
@@ -73,14 +57,13 @@ def split_long(lines: list[tuple[str, int]], max_chars: int) -> list[list[tuple[
         cur.append(item)
     if cur:
         blocks.append(cur)
-    # 2) kelompokkan blok sampai max_chars
     groups, cur, size = [], [], 0
     for block in blocks:
         bsize = sum(len(t) + 1 for t, _ in block)
         if cur and size + bsize > max_chars:
             groups.append(cur)
             cur, size = [], 0
-        if bsize > max_chars:  # satu ayat terlalu panjang: potong per baris, di akhir kalimat bila bisa
+        if bsize > max_chars:  # ayat terlalu panjang: potong per baris
             piece, psize = [], 0
             for item in block:
                 piece.append(item)
@@ -99,11 +82,10 @@ def split_long(lines: list[tuple[str, int]], max_chars: int) -> list[list[tuple[
 
 
 def segment_regulation(pages: list[str]) -> list[dict]:
-    """Potong dokumen peraturan per pasal (dan per ayat bila panjang)."""
     lines = join_pages(pages)
     segments, cur, cur_pasal, bagian = [], [], None, "Pembukaan"
-    pending = []          # judul BAB/Bagian/Paragraf yang akan ditempel ke pasal berikutnya
-    in_heading = False    # baris setelah judul struktur = nama judulnya (mis. "Layanan Pengaduan")
+    pending = []  # judul BAB/Bagian/Paragraf, ditempel ke pasal berikutnya
+    in_heading = False
 
     def flush():
         if cur:
@@ -126,7 +108,7 @@ def segment_regulation(pages: list[str]) -> list[dict]:
                 bagian = "Batang Tubuh"
             cur.append((line, page))
             continue
-        if in_heading:  # nama judul struktur (bisa lebih dari satu baris)
+        if in_heading:
             pending.append((line, page))
             continue
         cur.append((line, page))
@@ -149,7 +131,7 @@ def segment_regulation(pages: list[str]) -> list[dict]:
 
 
 def segment_faq(pages: list[str]) -> list[dict]:
-    """Potong FAQ per nomor pertanyaan (nomor harus berurutan, supaya daftar di dalam jawaban tidak memecah)."""
+    # nomor harus berurutan, supaya daftar bernomor di dalam jawaban tidak dianggap pertanyaan baru
     lines = join_pages(pages)
     groups, cur, expected = [], [], 1
     for line, page in lines:
@@ -174,7 +156,6 @@ def segment_faq(pages: list[str]) -> list[dict]:
 
 
 def build_chunks(pdf_path: Path, pages: list[str]) -> list[tuple[str, str, dict]]:
-    """Hasilkan (id, teks, metadata). ID: <file>-p<halaman_awal>-c<urutan di halaman itu>."""
     is_faq = pdf_path.stem.lower().startswith("faq")
     raw = segment_faq(pages) if is_faq else segment_regulation(pages)
     out, per_page = [], {}

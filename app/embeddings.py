@@ -1,12 +1,6 @@
-"""
-Embedding lewat API yang kompatibel dengan format OpenAI (endpoint /embeddings).
+"""Embedding lewat endpoint /embeddings yang kompatibel dengan OpenAI.
 
-Dipakai oleh ingest.py (embed dokumen) dan rag.py (embed pertanyaan).
-Nama model "chroma-default" berarti: pakai embedding bawaan Chroma (baseline).
-
-Konfigurasi di .env (opsional, kalau kosong memakai LLM_BASE_URL / LLM_API_KEY):
-    EMB_BASE_URL=...
-    EMB_API_KEY=...
+"chroma-default" = embedding bawaan Chroma. Kunci dari EMB_BASE_URL / EMB_API_KEY, fallback ke LLM_*.
 """
 
 import os
@@ -22,12 +16,11 @@ DEFAULT_EMBEDDING = "chroma-default"
 
 
 def slug(model: str) -> str:
-    """Nama model -> potongan aman untuk nama koleksi Chroma."""
     return re.sub(r"[^a-z0-9]+", "-", model.lower()).strip("-")
 
 
 def collection_name(domain: str, embedding: str, chunk_size: int, overlap: int) -> str:
-    # Baseline tetap memakai nama lama supaya report sebelumnya masih bisa direproduksi.
+    # nama lama dipertahankan supaya report lama masih bisa dijalankan ulang
     if embedding == DEFAULT_EMBEDDING:
         return f"{domain}_cs{chunk_size}_ov{overlap}"
     return f"{domain}_{slug(embedding)}_cs{chunk_size}_ov{overlap}"
@@ -42,9 +35,8 @@ def _client() -> OpenAI:
 
 def embed(texts: list[str], model: str, batch_size: int = 50, sleep: float = 35.0,
           max_retries: int = 5) -> list[list[float]]:
-    """Embed banyak teks per batch.
-    Free tier Gemini menghitung SETIAP teks sebagai satu request (limit 100/menit),
-    jadi 50 teks per batch + jeda 35 detik ~ 86 teks/menit, di bawah limit."""
+    # Free tier Gemini menghitung tiap teks sebagai satu request (100/menit),
+    # jadi 50 teks per batch dengan jeda 35 detik.
     from openai import RateLimitError
 
     client = _client()
@@ -63,7 +55,7 @@ def embed(texts: list[str], model: str, batch_size: int = 50, sleep: float = 35.
                 time.sleep(wait)
 
         data = resp.data
-        # Sebagian provider (mis. Gemini) tidak mengisi `index`; kalau begitu andalkan urutan respons.
+        # Gemini tidak mengisi `index`, jadi urutan respons yang dipakai
         if all(getattr(d, "index", None) is not None for d in data):
             data = sorted(data, key=lambda d: d.index)
         if len(data) != len(batch):

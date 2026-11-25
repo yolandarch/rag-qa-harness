@@ -1,4 +1,3 @@
-"""Unit test logika retrieval yang tidak butuh Chroma/API."""
 from app.rag import _cap_faq, tokenize
 from evals.retrieval import is_relevant, pasal_range
 

@@ -1,4 +1,4 @@
-"""Exp 9: query rewriting. Tanpa API: client LLM dipalsukan."""
+"""Query rewriting, dengan client LLM palsu."""
 import app.rag as rag
 import app.rewrite as rw
 from app.rewrite import parse_query
@@ -22,7 +22,6 @@ def test_fallback_kalau_llm_error(monkeypatch):
 
 
 def test_rewrite_hanya_untuk_retrieval(monkeypatch):
-    """Retrieval memakai query hasil rewrite, tapi model penjawab tetap menerima pertanyaan ASLI."""
     seen = {}
 
     class _Msg:
@@ -102,6 +101,6 @@ def test_cache_dipakai_ulang(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "_client", lambda: (_C(), "fake-model"))
 
     assert rw.rewrite_query("q1") == ("query bersih", False)
-    rw.rewrite_query.cache_clear()  # simulasi proses baru: cache memori kosong, cache file tetap
+    rw.rewrite_query.cache_clear()  # proses baru: cache memori kosong, cache file tetap
     assert rw.rewrite_query("q1") == ("query bersih", False)
     assert n["calls"] == 1

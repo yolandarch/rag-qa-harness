@@ -1,4 +1,4 @@
-"""Unit test pengecekan deterministik di evals/run.py. Tidak memanggil API apa pun."""
+"""Cek deterministik di evals/run.py."""
 from evals.run import CITATION_RE, evaluate, is_refusal, normalize, term_found
 
 REFUSAL = "Informasi tersebut tidak tersedia dalam dokumen yang saya miliki."

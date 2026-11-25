@@ -1,4 +1,4 @@
-"""Unit test chunking berbasis pasal dengan halaman sintetis (tanpa PDF)."""
+"""Chunking per pasal, dengan halaman sintetis."""
 from pathlib import Path
 
 from app.ingest_pasal import build_chunks, split_long
@@ -19,12 +19,11 @@ def chunks():
 def test_kalimat_lintas_halaman_utuh():
     text75 = [t for _, t, m in chunks() if m.get("pasal") == "Pasal 75"]
     joined = "\n".join(text75)
-    assert "sejak tanggal\npermintaan tindak lanjut" in joined  # header/footer halaman terbuang
+    assert "sejak tanggal\npermintaan tindak lanjut" in joined
 
 
 def test_baris_berawalan_nomor_bukan_ayat_baru():
-    # "(5) merupakan PUJK" adalah sambungan baris dari ayat (2), bukan ayat (5).
-    # Dengan batas ukuran sangat kecil, setiap AYAT jadi satu kelompok -> harus 2 kelompok, bukan 3.
+    # "(5) merupakan PUJK" sambungan dari ayat (2), jadi harus 2 kelompok, bukan 3
     lines = [("(1) PUJK wajib menyelesaikan.", 1),
              ("(2) Dalam hal pihak lain sebagaimana dimaksud pada ayat", 1),
              ("(5) merupakan PUJK, wajib menyampaikan.", 1)]

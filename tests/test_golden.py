@@ -1,4 +1,4 @@
-"""Validasi skema golden set: menangkap kesalahan ketik sebelum eval yang mahal dijalankan."""
+"""Validasi skema golden set."""
 import json
 import re
 from pathlib import Path

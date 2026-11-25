@@ -1,5 +1,4 @@
-"""Smoke test end-to-end answer() dengan retrieval & LLM palsu.
-Menangkap bug seperti fungsi yang tidak sengaja terhapus (NameError) sebelum eval berbayar."""
+"""Smoke test answer() dengan retrieval dan LLM palsu."""
 import app.rag as rag
 
 

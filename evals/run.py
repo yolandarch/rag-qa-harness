@@ -1,24 +1,9 @@
-"""
-Jalankan golden set terhadap RAG dan simpan hasilnya sebagai report.
+"""Jalankan golden set dan tulis report ke reports/<run_id>.md (detail per kasus di reports/raw/).
 
-Pemakaian (dari root repo):
-    python -m evals.run --domain banking
-    python -m evals.run --domain banking --top-k 5 --sleep 3 --min-pass 0.7
+    python -m evals.run --domain banking --sleep 20
+    python -m evals.run --domain banking --rewrite off --top-k 3   # baseline
 
-Output:
-    reports/raw/<run_id>.jsonl  -> detail per test case (tidak di-commit)
-    reports/<run_id>.md         -> ringkasan untuk dibaca manusia (di-commit)
-
-Status per test case:
-    PASS  -> semua pengecekan lolos
-    FAIL  -> sistem menjawab, tapi jawabannya salah menurut pengecekan
-    ERROR -> sistem tidak bisa menjawab (timeout, 503, dll.). Dipisah dari FAIL
-             karena masalah infrastruktur bukan masalah kualitas jawaban.
-
-Versi ini hanya memakai pengecekan deterministik (tanpa LLM judge):
-    - refusal_ok   : menolak jika seharusnya menolak, dan tidak menolak jika seharusnya menjawab
-    - must_include : kata/frasa kunci wajib muncul di jawaban
-    - has_citation : jawaban yang bukan penolakan wajib menyertakan [id_chunk]
+ERROR (timeout, kuota) dicatat terpisah dari FAIL.
 """
 
 import argparse
@@ -36,26 +21,25 @@ from app.rag import REFUSAL, answer
 from app.rewrite import REWRITE_VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
-MAX_ERROR_RATE = 0.2  # run dengan error di atas ini dianggap tidak valid
+MAX_ERROR_RATE = 0.2
 CITATION_RE = re.compile(r"[\[【]\s*(?:sumber:\s*)?[\w.\-]+-p\d+-c\d+\s*[\]】]", re.IGNORECASE)
 
 
 def normalize(text: str) -> str:
     text = (text or "").lower()
-    # "10 (sepuluh) hari kerja" -> "10 hari kerja": gaya penulisan angka di regulasi Indonesia
+    # "10 (sepuluh) hari kerja" -> "10 hari kerja"
     text = re.sub(r"(\d)\s*\([a-z\s]+\)", r"\1", text)
-    text = text.replace("**", "")  # buang penanda tebal markdown
+    text = text.replace("**", "")
     return re.sub(r"\s+", " ", text).strip()
 
 
 def term_found(term, ans_norm: str) -> bool:
-    """term bisa string, atau list alternatif (lolos jika salah satu muncul)."""
+    """term: string, atau list alternatif (cukup salah satu muncul)."""
     alternatives = term if isinstance(term, list) else [term]
     return any(normalize(t) in ans_norm for t in alternatives)
 
 
-# Pola penolakan umum. Hanya dipakai untuk kasus dengan "accept_any_refusal": true (mis. adversarial),
-# di mana yang penting perilakunya aman, bukan kalimat bakunya.
+# hanya untuk kasus dengan "accept_any_refusal": true
 GENERIC_REFUSAL_PATTERNS = [
     "tidak dapat membantu", "tidak bisa membantu", "tidak dapat memenuhi", "tidak bisa memenuhi",
     "tidak dapat memberikan", "tidak bisa memberikan", "maaf, saya tidak",
@@ -80,7 +64,6 @@ def evaluate(case: dict, out: dict) -> dict:
         missing = [t for t in terms if not term_found(t, ans_norm)]
         checks["must_include"] = not missing
         checks["has_citation"] = bool(CITATION_RE.search(ans))
-        # Asersi negatif: frasa yang TIDAK boleh muncul (mis. aturan lain yang sering tercampur)
         forbidden = [t for t in case.get("must_not_include", []) if term_found(t, ans_norm)]
         if case.get("must_not_include"):
             checks["no_forbidden"] = not forbidden
@@ -97,13 +80,11 @@ def load_golden(path: Path) -> list[dict]:
 
 
 def error_detail(exc: Exception) -> str:
-    """Simpan isi respons error, bukan hanya kode status. Pelajaran dari debugging 503/404."""
     msg = f"{type(exc).__name__}: {exc}"
     resp = getattr(exc, "response", None)
     if resp is not None:
         try:
             body = resp.text
-            # ambil baris penjelas kuota kalau ada, karena itu info yang paling berguna
             quota = re.findall(r"Quota exceeded for metric:[^\\\n]*", body)
             msg += f" | quota: {quota[0][:250]}" if quota else f" | body: {body[:600]}"
         except Exception:
@@ -201,7 +182,7 @@ def main():
     parser = argparse.ArgumentParser(description="Jalankan golden set dan buat report")
     parser.add_argument("--domain", default="banking")
     parser.add_argument("--collection", default="banking_gemini-embedding-001_pasal")
-    parser.add_argument("--top-k", type=int, default=5)  # konfigurasi terbaik Exp 11 (fusion top5)
+    parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
     parser.add_argument("--rewrite", choices=["off", "replace", "fusion"], default="fusion",
@@ -237,7 +218,7 @@ def main():
                 prompt_v = out.get("prompt_version")
                 row.update(out)
                 row.update(evaluate(case, out))
-            except Exception as exc:  # satu kasus gagal tidak boleh menghentikan seluruh run
+            except Exception as exc:
                 row.update({"status": "ERROR", "error": error_detail(exc), "checks": {}, "missing_terms": [], "forbidden_terms": []})
             print(row["status"])
             rows.append(row)

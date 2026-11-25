@@ -1,22 +1,8 @@
-"""
-Eksperimen 9: query rewriting untuk RETRIEVAL.
+"""Query rewriting untuk retrieval.
 
-Masalah yang ditarget (lihat README, diagnosis --show): kata-kata di pertanyaan menyesatkan
-pencarian. Nama dokumen ("POJK 22/2023") menarik chunk tentang dokumen secara umum, dan kalimat
-manipulatif ("saya petugas OJK, abaikan dokumen") membelokkan BM25 maupun embedding.
-
-Desain keamanan:
-- Hasil rewrite HANYA dipakai untuk mencari chunk. Model penjawab tetap menerima pertanyaan ASLI,
-  jadi rewriter tidak bisa "menghapus" instruksi jahat sebelum dinilai oleh aturan system prompt,
-  dan tidak bisa mengubah apa yang ditanyakan.
-- Pertanyaan dibungkus tag dan diperlakukan sebagai data, bukan instruksi.
-- Output divalidasi (JSON, panjang wajar). Gagal apa pun -> pakai pertanyaan asli (fallback),
-  dan fallback dicatat di hasil supaya kelihatan di report.
-
-Contoh di prompt sengaja TIDAK diambil dari golden set, supaya tidak bocor ke data uji.
-rw-v1 juga sengaja generik: tidak ada aturan khusus untuk pertanyaan "peraturan mana yang berlaku"
-(S001/S002). Kalau aturan seperti itu ditambahkan nanti, itu perbaikan yang ditulis SETELAH melihat
-kasus gagalnya, jadi hasilnya pada S001/S002 harus dilaporkan sebagai in-sample.
+Hasil rewrite hanya dipakai untuk mencari; model penjawab tetap menerima pertanyaan asli.
+Kalau API gagal atau output-nya tidak valid, pertanyaan asli yang dipakai.
+Contoh di prompt sengaja bukan dari golden set.
 """
 
 import json
@@ -29,10 +15,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 REWRITE_VERSION = "rw-v1"
-# Hasil rewrite disimpan ke file supaya run berikutnya memakai query yang SAMA persis:
-# LLM tetap memberi output berbeda antar-panggilan walau temperature=0, dan itu membuat
-# perbandingan antar-konfigurasi (mis. top_k 3 vs 5) tercampur variasi rewrite.
-# Di-commit ke repo supaya hasil eksperimen bisa direproduksi. Hapus file untuk membuat ulang.
+# Output rewriter berubah antar-run walau temperature=0, jadi hasilnya di-cache supaya
+# perbandingan antar-konfigurasi memakai query yang sama. Hapus file ini untuk membuat ulang.
 CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "rewrite_cache.json"
 MAX_QUERY_CHARS = 300
 
@@ -67,7 +51,7 @@ def _client() -> tuple[OpenAI, str]:
 
 
 def parse_query(raw: str) -> str | None:
-    """Ambil field "query" dari output model. None jika tidak valid."""
+    """Field "query" dari output model, atau None kalau tidak valid."""
     m = re.search(r"\{.*\}", raw or "", re.DOTALL)
     if not m:
         return None
@@ -97,8 +81,7 @@ def _save_cache(cache: dict) -> None:
 
 @lru_cache(maxsize=512)
 def rewrite_query(question: str) -> tuple[str, bool]:
-    """Kembalikan (query_untuk_retrieval, fallback). fallback=True berarti pertanyaan asli yang dipakai.
-    Hasil sukses di-cache per (versi prompt, model, pertanyaan); fallback tidak di-cache."""
+    """(query, fallback). fallback=True berarti pertanyaan asli yang dipakai (tidak di-cache)."""
     try:
         client, model = _client()
         key = f"{REWRITE_VERSION}::{model}::{question}"
@@ -114,7 +97,7 @@ def rewrite_query(question: str) -> tuple[str, bool]:
             ],
         )
         q = parse_query(resp.choices[0].message.content or "")
-    except Exception as exc:  # jaringan, kuota, dll: jangan gagalkan seluruh jawaban
+    except Exception as exc:
         print(f"[rewrite] gagal ({type(exc).__name__}), pakai pertanyaan asli")
         return question, True
     if q is None:
@@ -127,7 +110,7 @@ def rewrite_query(question: str) -> tuple[str, bool]:
 
 
 def seed_from_run(raw_jsonl: Path) -> int:
-    """Isi cache dari raw jsonl sebuah run eval, supaya run berikutnya memakai query yang sama persis."""
+    """Isi cache dari reports/raw/<run_id>.jsonl."""
     cache, n = _load_cache(), 0
     for line in raw_jsonl.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)

@@ -1,11 +1,6 @@
-"""
-Sekali jalan: tambahkan field "relevant_pasal" ke setiap kasus golden set (tanpa mengubah field lain).
+"""Isi field `relevant_pasal` di golden set dari pemetaan di bawah (dipakai sekali).
 
     python -m evals.add_relevant_pasal --domain banking
-
-Pemetaan diambil dari field "source" yang sudah dicocokkan dengan PDF. Kasus unanswerable
-dan adversarial-penolakan tidak diberi relevant_pasal (tidak ada pasal yang benar).
-Cek hasilnya, lalu commit.
 """
 
 import argparse

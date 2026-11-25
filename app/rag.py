@@ -1,13 +1,7 @@
-"""
-RAG sederhana: pertanyaan -> retrieve top-k chunk dari Chroma -> prompt -> LLM -> jawaban + sumber.
+"""Retrieve chunk dari Chroma, lalu jawab dengan LLM (endpoint kompatibel OpenAI, diatur di .env).
 
-Pemakaian (dari root repo):
     python -m app.rag "Berapa lama bank wajib menyelesaikan pengaduan nasabah?"
-    python -m app.rag "..." --top-k 5 --collection banking_gemini-embedding-001_cs800_ov150
-
-LLM dipanggil lewat API yang kompatibel dengan format OpenAI, jadi provider bisa diganti
-cukup lewat .env (LLM_BASE_URL, LLM_API_KEY, LLM_MODEL) tanpa mengubah kode.
-Model embedding untuk pertanyaan dibaca otomatis dari metadata koleksi Chroma.
+    python -m app.rag "..." --rewrite off --top-k 3
 """
 
 import argparse
@@ -28,13 +22,12 @@ from app.rewrite import REWRITE_VERSION, rewrite_query
 ROOT = Path(__file__).resolve().parent.parent
 CHROMA_DIR = ROOT / ".chroma"
 
-# Naikkan setiap kali prompt atau format konteks berubah, supaya report bisa dilacak.
-# Eksperimen 5 (nomor pasal di header) TIDAK diadopsi: F002 tetap tercampur dan F005 jadi false refusal 2/2.
-# Metadata pasal tetap disimpan di koleksi, tapi tidak ditampilkan ke model kecuali SHOW_PASAL=True.
+# Naikkan versinya tiap kali prompt atau format konteks berubah.
+# SHOW_PASAL (nomor pasal di header konteks) tidak dipakai, lihat Exp 5 di README.
 SHOW_PASAL = False
 PROMPT_VERSION = "v4-pasal-headers" if SHOW_PASAL else "v2-doc-titles"
 
-# Kalimat penolakan dibuat baku supaya evaluasi kategori "unanswerable" bisa dicek secara pasti.
+# kalimat baku, supaya penolakan bisa dicek otomatis
 REFUSAL = "Informasi tersebut tidak tersedia dalam dokumen yang saya miliki."
 
 SYSTEM_PROMPT = f"""Kamu adalah asisten layanan nasabah yang menjawab berdasarkan dokumen regulasi dan ketentuan yang diberikan.
@@ -61,7 +54,6 @@ def tokenize(text: str) -> list[str]:
 
 @lru_cache(maxsize=4)
 def _bm25_index(collection_name: str):
-    """Index BM25 dibangun sekali per proses dari seluruh chunk di koleksi."""
     from rank_bm25 import BM25Okapi
 
     col = chromadb.PersistentClient(path=str(CHROMA_DIR)).get_collection(collection_name)
@@ -70,12 +62,12 @@ def _bm25_index(collection_name: str):
 
 
 def _dense(question: str, collection, emb_model: str, n: int, query_vec=None) -> list[dict]:
-    if query_vec is not None:  # embedding pertanyaan sudah dihitung (hemat kuota saat membandingkan koleksi)
+    if query_vec is not None:  # sudah di-embed sebelumnya
         res = collection.query(query_embeddings=[query_vec], n_results=n)
     elif emb_model == DEFAULT_EMBEDDING:
         res = collection.query(query_texts=[question], n_results=n)
     else:
-        # pertanyaan WAJIB di-embed dengan model yang sama dengan dokumen
+        # harus model yang sama dengan dokumen
         res = collection.query(query_embeddings=embed([question], emb_model), n_results=n)
     return [
         {"id": cid, "text": doc, "metadata": meta, "distance": dist}
@@ -86,7 +78,6 @@ def _dense(question: str, collection, emb_model: str, n: int, query_vec=None) ->
 
 
 def _cap_faq(ranked: list[dict], top_k: int, max_faq: int | None) -> list[dict]:
-    """Ambil top_k dari daftar terurut, dengan paling banyak max_faq chunk dari FAQ."""
     if max_faq is None:
         return ranked[:top_k]
     out, n_faq = [], 0
@@ -104,11 +95,8 @@ def _cap_faq(ranked: list[dict], top_k: int, max_faq: int | None) -> list[dict]:
 def retrieve(question: str, collection_name: str, top_k: int, mode: str = "dense",
              query_vec=None, max_faq: int | None = None,
              extra_queries: tuple[str, ...] = (), extra_vecs: list | None = None) -> tuple[list[dict], str]:
-    """mode="dense": embedding saja. mode="hybrid": embedding + BM25, digabung dengan
-    Reciprocal Rank Fusion (RRF), supaya chunk yang cocok kata-per-kata (mis. "lisan") ikut naik.
-
-    extra_queries (Exp 9b, multi-query): query tambahan (mis. hasil rewrite) yang daftar hasilnya
-    ikut digabung dengan RRF. Tanpa extra_queries, perilakunya sama persis dengan sebelumnya."""
+    """mode: "dense" atau "hybrid" (dense + BM25, digabung dengan RRF).
+    extra_queries: query tambahan (mis. hasil rewrite) yang hasilnya ikut digabung RRF."""
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     collection = client.get_collection(collection_name)
     emb_model = (collection.metadata or {}).get("embedding_model", DEFAULT_EMBEDDING)
@@ -143,8 +131,7 @@ def retrieve(question: str, collection_name: str, top_k: int, mode: str = "dense
 
 
 def load_doc_titles(collection_name: str) -> dict:
-    """Judul dokumen yang mudah dibaca, dari data/<domain>/doc_titles.json.
-    Domain diambil dari awal nama koleksi (mis. 'banking_...')."""
+    # domain = awalan nama koleksi, mis. "banking_..."
     domain = collection_name.split("_")[0]
     path = ROOT / "data" / domain / "doc_titles.json"
     if not path.exists():
@@ -153,7 +140,6 @@ def load_doc_titles(collection_name: str) -> dict:
 
 
 def chunk_location(meta: dict, titles: dict) -> str:
-    """Lokasi chunk yang mudah dibaca: dokumen, pasal (jika ada), bagian penjelasan, halaman."""
     parts = [f"dokumen: {titles.get(meta['source'], meta['source'])}"]
     if SHOW_PASAL and meta.get("pasal"):
         parts.append(meta["pasal"] + (" (bagian Penjelasan)" if meta.get("bagian") == "Penjelasan" else ""))
@@ -163,8 +149,7 @@ def chunk_location(meta: dict, titles: dict) -> str:
 
 
 def build_context(chunks: list[dict], titles: dict) -> str:
-    # Header berisi judul dokumen lengkap, bukan hanya nama file, supaya model tahu
-    # potongan teks itu berasal dari peraturan apa (contextual chunk header).
+    # header berisi judul dokumen lengkap, bukan cuma nama file
     return "\n\n".join(
         f"[{c['id']}] ({chunk_location(c['metadata'], titles)})\n{c['text']}"
         for c in chunks
@@ -173,10 +158,8 @@ def build_context(chunks: list[dict], titles: dict) -> str:
 
 def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: int = 4,
            retrieval: str = "dense", max_faq: int | None = None, rewrite: str | None = None) -> dict:
-    """rewrite: None (mati) | "replace" (cari pakai query hasil rewrite saja)
-    | "fusion" (cari pakai pertanyaan asli DAN hasil rewrite, digabung RRF)."""
-    """Jalankan satu pertanyaan end-to-end. Mengembalikan dict yang nanti dipakai oleh evaluator."""
-    # override=True: isi .env selalu menang atas variabel lama yang tertinggal di terminal
+    """rewrite: None, "replace" (cari pakai hasil rewrite saja) atau "fusion" (asli + rewrite)."""
+    # override=True: isi .env menang atas variabel lama yang tertinggal di terminal
     load_dotenv(ROOT / ".env", override=True)
     for var in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
         if not os.getenv(var):
@@ -185,13 +168,13 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
     llm = OpenAI(
         base_url=os.environ["LLM_BASE_URL"],
         api_key=os.environ["LLM_API_KEY"],
-        timeout=60,      # gagal setelah 60 detik, jangan menunggu selamanya
-        max_retries=1,   # cukup coba ulang sekali
+        timeout=60,
+        max_retries=1,
     )
     model = os.environ["LLM_MODEL"]
 
     t0 = time.perf_counter()
-    # Rewrite hanya untuk PENCARIAN; model penjawab tetap menerima pertanyaan asli.
+    # rewrite hanya untuk pencarian; model penjawab tetap dapat pertanyaan asli
     if rewrite not in (None, "replace", "fusion"):
         raise ValueError(f"mode rewrite tidak dikenal: {rewrite}")
     search_query, rewrite_fallback = rewrite_query(question) if rewrite else (question, False)
@@ -210,7 +193,7 @@ def answer(question: str, collection_name: str = "banking_cs800_ov150", top_k: i
     t1 = time.perf_counter()
     resp = llm.chat.completions.create(
         model=model,
-        temperature=0,  # sekecil mungkin variasi antar-run, penting untuk regression test
+        temperature=0,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"KONTEKS:\n{build_context(chunks, titles)}\n\nPERTANYAAN:\n{question}"},
@@ -245,7 +228,7 @@ def main():
     parser = argparse.ArgumentParser(description="Tanya RAG dari command line")
     parser.add_argument("question")
     parser.add_argument("--collection", default="banking_gemini-embedding-001_pasal")
-    parser.add_argument("--top-k", type=int, default=5)  # konfigurasi terbaik Exp 11 (fusion top5)
+    parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--retrieval", choices=["dense", "hybrid"], default="hybrid")
     parser.add_argument("--max-faq", type=int, default=None, help="batas jumlah chunk FAQ di konteks")
     parser.add_argument("--rewrite", choices=["off", "replace", "fusion"], default="fusion",

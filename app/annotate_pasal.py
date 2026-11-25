@@ -1,19 +1,8 @@
-"""
-Tambahkan metadata nomor pasal ke chunk yang SUDAH ada di Chroma, tanpa embed ulang.
+"""Tambah metadata `pasal` dan `bagian` ke chunk yang sudah ada di Chroma, tanpa embed ulang.
 
-Pemakaian (dari root repo):
-    python -m app.annotate_pasal --domain banking --collection banking_gemini-embedding-001_cs800_ov150
-    python -m app.annotate_pasal ... --dry-run     # lihat contoh hasil tanpa mengubah koleksi
+PDF dipotong ulang dengan chunk_size/overlap dari metadata koleksi, jadi ID chunk-nya sama.
 
-Cara kerja:
-- PDF dipotong ulang dengan chunking yang SAMA PERSIS seperti saat ingest (chunk_size & overlap
-  dibaca dari metadata koleksi), sehingga ID chunk cocok.
-- Judul pasal dikenali dari baris yang isinya hanya "Pasal N" (bukan rujukan di tengah kalimat
-  seperti "sebagaimana dimaksud dalam Pasal 71").
-- Setiap chunk diberi:
-    pasal   : pasal yang berlaku di awal chunk, mis. "Pasal 75" (atau "Pasal 74-75" jika chunk
-              memuat judul pasal baru)
-    bagian  : "Batang Tubuh" atau "Penjelasan" (bagian penjelasan POJK mengulang judul pasal)
+    python -m app.annotate_pasal --domain banking --collection banking_gemini-embedding-001_cs800_ov150 [--dry-run]
 """
 
 import argparse
@@ -37,26 +26,25 @@ def pasal_label(start_pasal: str | None, inner: list[str]) -> str:
 
 
 def annotate_pdf(pdf_path: Path, chunk_size: int, overlap: int):
-    """Hasilkan (chunk_id, metadata) dengan logika chunking yang identik dengan ingest.py."""
+    """(chunk_id, metadata) per chunk, dipotong sama persis seperti ingest.py."""
     reader = PdfReader(str(pdf_path))
     current_pasal, bagian = None, "Batang Tubuh"
     for page_num, page in enumerate(reader.pages, start=1):
         text = clean_text(page.extract_text() or "")
         if not text:
             continue
-        # posisi judul pasal & penjelasan di halaman ini
         headings = [(m.start(), m.group(1)) for m in PASAL_HEADING.finditer(text)]
         penjelasan_pos = [m.start() for m in PENJELASAN_HEADING.finditer(text)]
 
         cursor = 0
         for i, chunk in enumerate(chunk_text(text, chunk_size, overlap)):
             start = text.find(chunk, cursor)
-            if start == -1:  # seharusnya tidak terjadi; jangan menebak posisi
+            if start == -1:
                 start = cursor
             end = start + len(chunk)
             cursor = max(cursor, start + 1)
 
-            # pasal yang berlaku di AWAL chunk = judul terakhir sebelum start
+            # pasal di awal chunk = judul pasal terakhir sebelum start
             before = [num for pos, num in headings if pos < start]
             start_pasal = before[-1] if before else current_pasal
             inner = [num for pos, num in headings if start <= pos < end]
@@ -95,7 +83,7 @@ def main():
                 metas.append(meta)
 
     if missing:
-        # ID tidak cocok = chunking berbeda dari saat ingest. Jangan update sebagian.
+        # ID beda berarti chunking-nya beda dari saat ingest; jangan update sebagian
         raise SystemExit(f"{len(missing)} ID chunk tidak ditemukan di koleksi (contoh: {missing[:3]}). "
                          "Pastikan PDF dan chunk_size/overlap sama dengan saat ingest.")
     if len(ids) != len(existing):
@@ -111,10 +99,10 @@ def main():
         print("\n--dry-run: koleksi TIDAK diubah.")
         return
     for b in range(0, len(ids), 100):
-        col.update(ids=ids[b:b + 100], metadatas=metas[b:b + 100])  # embedding tidak disentuh
+        col.update(ids=ids[b:b + 100], metadatas=metas[b:b + 100])
     try:
         col.modify(metadata={**cmeta, "pasal_annotated": True})
-    except Exception as e:  # tidak kritis: penanda saja
+    except Exception as e:
         print(f"[WARN] gagal menandai metadata koleksi: {e}")
     print("Metadata pasal tersimpan.")
 

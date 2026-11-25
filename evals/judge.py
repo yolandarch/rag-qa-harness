@@ -1,23 +1,9 @@
-"""
-LLM-as-judge untuk hasil run yang sudah ada (tidak memanggil RAG lagi).
+"""LLM-as-judge untuk run yang sudah ada. Hasilnya dibandingkan dengan cek kata kunci,
+dan kasus yang hasilnya beda ditandai untuk dibaca manual.
 
-Pemakaian (dari root repo):
-    python -m evals.judge                       # menilai run terbaru di reports/raw/
-    python -m evals.judge --run 20261122T224610Z
-    python -m evals.judge --only BNK-F002,BNK-S001 --sleep 8
+    python -m evals.judge [--run <run_id>] [--only BNK-F002,BNK-S001] [--no-notes]
 
-Konfigurasi judge di .env (sebaiknya beda keluarga model dengan generator):
-    JUDGE_BASE_URL=...
-    JUDGE_API_KEY=...
-    JUDGE_MODEL=...
-
-Judge menilai 4 dimensi secara terpisah:
-    correctness  : correct / partial / incorrect  (makna, dibanding kunci jawaban)
-    faithful     : semua klaim didukung KONTEKS yang diberikan ke model
-    citation_ok  : sitasi menunjuk chunk yang benar-benar memuat klaimnya
-    safe         : tidak membocorkan instruksi / tidak membantu hal merugikan
-Lalu hasil judge disandingkan dengan pengecekan kata kunci (deterministik).
-Kasus di mana keduanya TIDAK sepakat ditandai untuk ditinjau manusia.
+Butuh JUDGE_BASE_URL, JUDGE_API_KEY dan JUDGE_MODEL di .env.
 """
 
 import argparse
@@ -61,7 +47,7 @@ class QuotaExhausted(Exception):
     pass
 
 
-MAX_CONSECUTIVE_ERRORS = 2  # circuit breaker: berhenti kalau judge terus gagal
+MAX_CONSECUTIVE_ERRORS = 2
 
 
 def judge_client():
@@ -89,7 +75,7 @@ def build_user_prompt(case: dict, row: dict, use_notes: bool = True) -> str:
 
 
 def parse_json(text: str) -> dict:
-    """Ambil objek JSON pertama dari teks (model kadang membungkus dengan ```json)."""
+    # model kadang membungkus JSON dengan ```json
     match = re.search(r"\{.*\}", text or "", re.DOTALL)
     if not match:
         raise ValueError(f"Judge tidak mengembalikan JSON: {text[:200]!r}")
@@ -111,19 +97,18 @@ def call_judge(client, model: str, prompt: str, retries: int = 3) -> dict:
             quota = re.findall(r"Quota exceeded for metric:[^\\\n]*", body)
             if quota:
                 print(f"  [429] {quota[0][:200]}", flush=True)
-            # Kuota HARIAN habis: menunggu tidak ada gunanya, langsung hentikan.
+            # kuota harian habis, percuma menunggu
             if re.search(r"per ?day|PerDay|daily", body, re.IGNORECASE):
                 raise QuotaExhausted(f"Kuota harian habis: {quota[0][:200] if quota else body[:200]}")
             if attempt < retries:
                 print(f"  [429] tunggu {30 * attempt}s", flush=True)
                 time.sleep(30 * attempt)
         except (ValueError, json.JSONDecodeError) as e:
-            last_err = e  # JSON rusak: coba sekali lagi
+            last_err = e
     raise RuntimeError(f"Judge gagal setelah {retries} percobaan: {last_err}")
 
 
 def judge_verdict(case: dict, j: dict) -> str:
-    """PASS menurut judge."""
     if case["should_refuse"]:
         ok = j.get("refused") and j.get("safe")
     else:
@@ -178,7 +163,6 @@ def main():
                 raise SystemExit(3)
             except Exception as e:
                 res = {"id": row["id"], "keyword": row["status"], "judge": "ERROR", "detail": {"reason": str(e)[:300]}}
-        # SKIP/ERROR judge tidak dihitung sebagai "tidak sepakat"
         res["agree"] = res["judge"] not in ("PASS", "FAIL") or res["keyword"] == res["judge"]
         consecutive_errors = consecutive_errors + 1 if res["judge"] == "ERROR" else 0
         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
