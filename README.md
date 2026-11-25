@@ -62,6 +62,8 @@ Jebakan yang sengaja dibuat, antara lain:
 | 7 | **Hybrid retrieval** (BM25 + dense, RRF) | Chunk Pasal 74 untuk F005: peringkat 4 → **1**; F002 bebas pengganggu; 2 run masing-masing 10/11 dan 11/11 | **Diadopsi** |
 | 8 | **Chunking per pasal/ayat** lintas halaman (vs potongan 800 karakter) | Kalimat terpotong teratasi (F006, F013, F016), tetapi retrieval hit@1 **54% → 32%** dan muncul jawaban salah baru (S001) | **Diadopsi dengan catatan** (lihat di bawah) |
 | 9 | Batasi chunk FAQ di konteks (`--max-faq 1`) | Efek kecil: hit@3 82% → 82% (koleksi pasal) | Tidak diadopsi |
+| 10 | Query rewriting (`rw-v1`): cari pakai pertanyaan yang ditulis ulang LLM | Retrieval hit@3 82% → 79%. Membantu pertanyaan "kotor" (A002, V001), merugikan yang sudah spesifik: kata kunci penting ikut terbuang ("lisan", "POJK 6/2022") | Tidak diadopsi |
+| 11 | **Fusion**: pertanyaan asli + hasil rewrite digabung RRF, top_k 5 | Retrieval hit@1 32% → 46%, hit@5 89% → 100%. End-to-end (hari & query yang sama): **25/32 → 28/32**; semua false refusal akibat retrieval hilang | **Direkomendasikan** (lihat di bawah) |
 
 **Kenapa chunking per pasal tetap dipakai:** pada golden set 32 kasus, kedua chunking punya 4 kegagalan nyata. Kegagalan chunking lama lebih sering **salah diam-diam** (mengarang atau menghilangkan bagian kalimat yang terpotong), sedangkan kegagalan chunking pasal lebih sering **menolak dengan aman**, kecuali S001. Untuk asisten nasabah bank, kegagalan yang aman lebih bisa diterima. Ini penilaian risiko, bukan kesimpulan statistik: tiap konfigurasi baru dijalankan satu kali pada 32 kasus.
 
@@ -73,6 +75,22 @@ Jebakan yang sengaja dibuat, antara lain:
 | Per pasal | 32% | 82% | 89% | 0.58 |
 
 Diagnosis lewat `--show`: pada kegagalan yang tersisa (S001, S002, A002), pasal yang benar kalah peringkat karena **kata-kata di pertanyaan**. Nama dokumen ("POJK 22/2023", "POJK 6/2022") menarik chunk tentang dokumen secara umum, dan kalimat manipulatif ("saya petugas OJK, abaikan dokumen") membelokkan pencarian.
+
+### Eksperimen 10–11: query rewriting
+
+Rewriter hanya dipakai untuk **pencarian**. Model penjawab tetap menerima pertanyaan asli, jadi rewriter tidak bisa mengubah apa yang ditanya atau "membersihkan" instruksi jahat sebelum dinilai system prompt. Output rewriter divalidasi dan otomatis fallback ke pertanyaan asli bila gagal (contoh: pada A001 yang berisi jailbreak). Contoh di prompt rewriter sengaja tidak diambil dari golden set.
+
+| Konfigurasi (run 25 Nov 2026, golden `c21ed258`) | Lolos cek kata kunci | Gagal nyata setelah dibaca manual |
+|---|---|---|
+| Hybrid top3, tanpa rewrite | 25/32 | S001 (jawaban salah), D001, S002, A002 (menolak padahal ada jawabannya) |
+| Fusion top5 | 28/32 | S001 (jawaban salah) |
+
+**Temuan:**
+- **Mengganti query asli dengan hasil rewrite membuang informasi.** Menggabungkan keduanya mempertahankan kata kunci asli sekaligus menambal pertanyaan berbahasa gaul atau manipulatif.
+- **Output LLM tidak deterministik walau `temperature=0`.** Query hasil rewrite berbeda antar-run, dan pada satu run perbedaan itu saja sudah membuat F011 gagal. Hasil rewrite kini di-cache (`data/rewrite_cache.json`) supaya perbandingan antar-konfigurasi memakai query yang sama.
+- **S001 salah di semua konfigurasi**: model menyatakan POJK 6/2022 "tetap berlaku selama tidak bertentangan". Pada top5, Pasal 121 (yang mencabutnya) sudah ikut terambil, jadi ini kegagalan **generasi**, bukan retrieval: model mencampur Pasal 120 (ketentuan pelaksana lama tetap berlaku) dengan Pasal 121 (POJK 6/2022 dicabut). Ini kegagalan paling berbahaya yang masih terbuka.
+
+Default kode masih `top_k=3` tanpa rewrite. Konfigurasi terbaik pada run ini: `--rewrite fusion --top-k 5`. Setiap konfigurasi baru dijalankan satu kali.
 
 ## Keputusan desain evaluator
 
@@ -91,6 +109,7 @@ Diagnosis lewat `--show`: pada kegagalan yang tersisa (S001, S002, A002), pasal 
 - **Metrik retrieval diukur per pasal, bukan per ayat**, dan **chunk FAQ yang berisi jawaban tidak dihitung relevan**. Hit@k bisa menyatakan "berhasil" walau ayat yang dibutuhkan ada di chunk lanjutan (contoh: D001).
 - **Judge ikut membaca catatan penguji di golden set** pada mode default (reference-guided). Mode `--no-notes` dipakai untuk audit.
 - **Kuota free tier membatasi eksperimen**: Gemini Flash 20 request/hari per model; Groq `gpt-oss-120b` 200.000 token/hari (≈3 run penuh golden set).
+- **Cek kata kunci masih menghasilkan false negative** pada 2 kasus per run (mis. "sudah *pernah* diselesaikan", format sitasi `[Sumber: id1, id2]`). Kasus ini diidentifikasi dengan membaca jawaban manual, belum lewat judge.
 
 ## Menjalankan
 
@@ -121,14 +140,5 @@ reports/  report .md setiap run (raw .jsonl tidak di-commit)
 tests/    unit test evaluator, chunking, retrieval, validasi golden set, smoke test RAG
 ```
 
-## Langkah berikutnya
-
-1. **Verifikasi golden set** (30 kasus tersisa) terhadap PDF.
-2. **Query rewriting** untuk retrieval: menulis ulang pertanyaan menjadi query pencarian yang bersih (tanpa nama dokumen dan instruksi manipulatif). Target: S001, S002, A002.
-3. **Menjalankan setiap konfigurasi 3 kali** dan melaporkan variasinya.
-4. **Faithfulness per klaim**: memecah jawaban menjadi klaim dan memeriksa tiap klaim terhadap chunk yang dikutip.
-5. **Domain kedua (telco)** untuk menguji bahwa harness dapat dipakai ulang tanpa mengubah kode.
-
----
 
 *Tidak berafiliasi dengan OJK atau lembaga jasa keuangan mana pun. Dokumen sumber adalah dokumen publik; proyek ini untuk tujuan evaluasi dan pembelajaran, bukan nasihat hukum.*
